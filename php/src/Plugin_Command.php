@@ -74,13 +74,23 @@ class Plugin_Command
     /**
      * Resolve context from path
      *
-     * @param string|null $context_path Context path or null for site-wide
+     * @param string|null $context_path Context path or null for default journal
      * @return int|null Context ID
      */
     private function resolve_context($context_path)
     {
         if ($context_path === null) {
-            return \PKP\core\PKPApplication::SITE_CONTEXT_ID; // null for site-wide
+            // Default to first available journal, not site-wide
+            $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
+            $journals = $journal_dao->getAll(true);
+
+            $first_journal = $journals->next();
+            if (!$first_journal) {
+                OJS_CLI::error("No journals found. Use --context=<journal-path> or create a journal first.");
+            }
+
+            OJS_CLI::log("Using journal: " . $first_journal->getPath());
+            return $first_journal->getId();
         }
 
         $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
@@ -130,12 +140,16 @@ class Plugin_Command
                     continue;
                 }
 
+                // Check if plugin is mandatory (cannot be disabled)
+                $can_disable = $plugin->getCanDisable();
+                $enabled_display = !$can_disable ? 'default' : ($enabled ? 'Yes' : 'No');
+
                 $all_plugins[] = [
                     'name' => $plugin_name,
                     'display_name' => $plugin->getDisplayName(),
                     'category' => $cat,
                     'version' => $this->get_plugin_version_string($plugin),
-                    'enabled' => $enabled
+                    'enabled' => $enabled_display
                 ];
             }
         }
@@ -316,9 +330,22 @@ class Plugin_Command
         }
 
         // Enable plugin using plugin object
-        $plugin->setEnabled(true);
+        // Check if plugin supports context parameter (like BlockPlugin)
+        $reflection = new \ReflectionMethod($plugin, 'setEnabled');
+        $params = $reflection->getParameters();
+        if (count($params) > 1) {
+            // Plugin supports context parameter
+            $plugin->setEnabled(true, $context_id);
+        } else {
+            // Fall back to updateSetting directly
+            $plugin->updateSetting($context_id, 'enabled', true, 'bool');
+        }
 
-        $context_msg = $context_id === \PKP\core\PKPApplication::SITE_CONTEXT_ID ? 'site-wide' : "context ID {$context_id}";
+        // Get journal path for display
+        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
+        $journal = $journal_dao->getById($context_id);
+        $context_msg = $journal ? "journal: " . $journal->getPath() : "context ID {$context_id}";
+
         OJS_CLI::success("Plugin activated: {$plugin_name} ({$context_msg})");
     }
 
@@ -386,9 +413,22 @@ class Plugin_Command
         }
 
         // Disable plugin using plugin object
-        $plugin->setEnabled(false);
+        // Check if plugin supports context parameter (like BlockPlugin)
+        $reflection = new \ReflectionMethod($plugin, 'setEnabled');
+        $params = $reflection->getParameters();
+        if (count($params) > 1) {
+            // Plugin supports context parameter
+            $plugin->setEnabled(false, $context_id);
+        } else {
+            // Fall back to updateSetting directly
+            $plugin->updateSetting($context_id, 'enabled', false, 'bool');
+        }
 
-        $context_msg = $context_id === \PKP\core\PKPApplication::SITE_CONTEXT_ID ? 'site-wide' : "context ID {$context_id}";
+        // Get journal path for display
+        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
+        $journal = $journal_dao->getById($context_id);
+        $context_msg = $journal ? "journal: " . $journal->getPath() : "context ID {$context_id}";
+
         OJS_CLI::success("Plugin deactivated: {$plugin_name} ({$context_msg})");
     }
 
@@ -464,7 +504,14 @@ class Plugin_Command
             try {
                 $plugin = $this->load_plugin_object($found_category, $plugin_name, $context_id);
                 if ($plugin) {
-                    $plugin->setEnabled(true);
+                    // Use reflection to check if setEnabled accepts context parameter
+                    $reflection = new \ReflectionMethod($plugin, 'setEnabled');
+                    $params = $reflection->getParameters();
+                    if (count($params) > 1) {
+                        $plugin->setEnabled(true, $context_id);
+                    } else {
+                        $plugin->updateSetting($context_id, 'enabled', true, 'bool');
+                    }
                     $results[] = [
                         'journal' => $journal->getPath(),
                         'status' => 'success'
@@ -528,7 +575,14 @@ class Plugin_Command
                             'message' => 'Plugin is mandatory'
                         ];
                     } else {
-                        $plugin->setEnabled(false);
+                        // Use reflection to check if setEnabled accepts context parameter
+                        $reflection = new \ReflectionMethod($plugin, 'setEnabled');
+                        $params = $reflection->getParameters();
+                        if (count($params) > 1) {
+                            $plugin->setEnabled(false, $context_id);
+                        } else {
+                            $plugin->updateSetting($context_id, 'enabled', false, 'bool');
+                        }
                         $results[] = [
                             'journal' => $journal->getPath(),
                             'status' => 'success'
