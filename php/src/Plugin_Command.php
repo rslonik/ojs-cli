@@ -204,13 +204,19 @@ class Plugin_Command
                 $can_disable = $plugin->getCanDisable();
                 $enabled_display = !$can_disable ? 'default' : ($is_enabled ? 'Yes' : 'No');
 
+                // Check for updates
+                $current_version = $this->get_plugin_version_string($plugin);
+                $update_info = $this->check_plugin_update($plugin, $current_version);
+
                 $all_plugins[] = [
                     'name' => $plugin_name,
                     'display_name' => $plugin->getDisplayName(),
                     'category' => $cat,
-                    'version' => $this->get_plugin_version_string($plugin),
+                    'version' => $current_version,
                     'enabled' => $enabled_display,
-                    'enabled_in' => $enabled_in
+                    'enabled_in' => $enabled_in,
+                    'update' => $update_info['status'],
+                    'update_version' => $update_info['version']
                 ];
             }
         }
@@ -961,5 +967,59 @@ class Plugin_Command
         }
 
         return 'unknown';
+    }
+
+    /**
+     * Check if plugin has an update available
+     *
+     * @param object $plugin Plugin object
+     * @param string $current_version Current installed version
+     * @return array ['status' => 'none'|'available', 'version' => '']
+     */
+    private function check_plugin_update($plugin, $current_version)
+    {
+        // Skip if version is unknown
+        if ($current_version === 'unknown') {
+            return ['status' => 'none', 'version' => ''];
+        }
+
+        try {
+            // Use PluginGalleryDAO to get latest compatible version
+            $pluginGalleryDao = \PKP\db\DAORegistry::getDAO('PluginGalleryDAO');
+            $application = \APP\core\Application::get();
+
+            $plugin_name = $plugin->getName();
+
+            // Normalize plugin name for gallery search
+            // Gallery uses directory name (e.g., "shariff") but getName() returns "shariffplugin"
+            $search_name = $plugin_name;
+            // Remove common suffixes: "plugin", "Plugin"
+            $search_name = preg_replace('/(plugin|Plugin)$/i', '', $search_name);
+
+            // Search for specific plugin using normalized name
+            $plugins = $pluginGalleryDao->getNewestCompatible($application, null, $search_name);
+
+            // Find matching plugin
+            foreach ($plugins as $galleryPlugin) {
+                // Match against normalized search name
+                if ($galleryPlugin->getProduct() === $search_name) {
+                    $available_version = $galleryPlugin->getVersion();
+
+                    // Compare versions
+                    if (version_compare($available_version, $current_version, '>')) {
+                        return ['status' => 'available', 'version' => $available_version];
+                    }
+
+                    break;
+                }
+            }
+        } catch (\Exception $e) {
+            if (getenv('OJS_CLI_DEBUG')) {
+                OJS_CLI::log("DEBUG: Exception in check_plugin_update: " . $e->getMessage());
+            }
+            // Silently fail if plugin gallery unavailable
+        }
+
+        return ['status' => 'none', 'version' => ''];
     }
 }
