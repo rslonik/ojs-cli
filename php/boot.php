@@ -15,8 +15,14 @@ if (PHP_SAPI !== 'cli' && PHP_SAPI !== 'phpdbg') {
 }
 
 // Set error handling for CLI
-ini_set('display_errors', '1');
-error_reporting(E_ALL);
+// Only show errors, not warnings/deprecations unless debug mode
+if (getenv('OJS_CLI_DEBUG')) {
+    ini_set('display_errors', '1');
+    error_reporting(E_ALL);
+} else {
+    ini_set('display_errors', '1');
+    error_reporting(E_ERROR | E_PARSE);
+}
 
 // Set up error handler for uncaught exceptions
 set_exception_handler(function ($e) {

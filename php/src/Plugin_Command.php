@@ -74,33 +74,84 @@ class Plugin_Command
     /**
      * Resolve context from path
      *
-     * @param string|null $context_path Context path or null for default journal
-     * @return int|null Context ID
+     * @param string|null $context_path Context path, 'site-wide' for site-wide, or null for auto-detect
+     * @return int|null Context ID (null for site-wide)
      */
     private function resolve_context($context_path)
     {
-        if ($context_path === null) {
-            // Default to first available journal, not site-wide
-            $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
-            $journals = $journal_dao->getAll(true);
+        // Explicit site-wide
+        if ($context_path === 'site-wide') {
+            return \PKP\core\PKPApplication::SITE_CONTEXT_ID; // null
+        }
 
-            $first_journal = $journals->next();
-            if (!$first_journal) {
-                OJS_CLI::error("No journals found. Use --context=<journal-path> or create a journal first.");
+        // Explicit journal path
+        if ($context_path !== null) {
+            $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
+            $journal = $journal_dao->getByPath($context_path);
+
+            if (!$journal) {
+                OJS_CLI::error("Journal not found: {$context_path}");
             }
 
-            OJS_CLI::log("Using journal: " . $first_journal->getPath());
-            return $first_journal->getId();
+            return $journal->getId();
         }
 
+        // Auto-detect: return null (will be resolved per-plugin)
+        return null;
+    }
+
+    /**
+     * Resolve context for a specific plugin
+     *
+     * @param object $plugin Plugin object
+     * @param int|null $requested_context Requested context ID or null for auto
+     * @return int|null Context ID
+     */
+    private function resolve_plugin_context($plugin, $requested_context)
+    {
+        // If context explicitly requested, use it
+        if ($requested_context !== null) {
+            return $requested_context;
+        }
+
+        // Check if plugin is truly site-wide by reading version.xml
+        if ($this->is_plugin_sitewide($plugin)) {
+            return \PKP\core\PKPApplication::SITE_CONTEXT_ID;
+        }
+
+        // Default to first available journal for journal-specific plugins
         $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
-        $journal = $journal_dao->getByPath($context_path);
+        $journals = $journal_dao->getAll(true);
 
-        if (!$journal) {
-            OJS_CLI::error("Journal not found: {$context_path}");
+        $first_journal = $journals->next();
+        if (!$first_journal) {
+            OJS_CLI::error("No journals found. Use --context=<journal-path> or create a journal first.");
         }
 
-        return $journal->getId();
+        return $first_journal->getId();
+    }
+
+    /**
+     * Check if plugin is site-wide by reading version.xml
+     *
+     * @param object $plugin Plugin object
+     * @return bool True if plugin is site-wide
+     */
+    private function is_plugin_sitewide($plugin)
+    {
+        try {
+            $pluginPath = $plugin->getPluginPath();
+            $versionFile = $pluginPath . '/version.xml';
+
+            if (file_exists($versionFile)) {
+                $versionInfo = \PKP\site\VersionCheck::parseVersionXML($versionFile);
+                return !empty($versionInfo['sitewide']);
+            }
+        } catch (\Exception $e) {
+            // Ignore errors reading version.xml
+        }
+
+        return false;
     }
 
     /**
@@ -120,41 +171,86 @@ class Plugin_Command
             $categories = \PKP\plugins\PluginRegistry::getCategories();
         }
 
+        // Get all journal contexts
+        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
+        $journals = $journal_dao->getAll(true);
+        $journal_contexts = [];
+        while ($journal = $journals->next()) {
+            $journal_contexts[$journal->getId()] = $journal->getPath();
+        }
+
         $all_plugins = [];
 
         foreach ($categories as $cat) {
             // Load from disk to get ALL plugins (not just enabled)
-            $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false, $context_id);
+            $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
 
             foreach ($plugins as $plugin) {
                 $plugin_name = $plugin->getName();
 
-                // Check enabled status via plugin object (respects mandatory plugins)
-                $enabled = $plugin->getEnabled($context_id);
+                // Check where this plugin is enabled
+                $enabled_in = $this->get_plugin_enabled_contexts($plugin, $journal_contexts);
 
-                // Apply status filter
-                if ($status_filter === 'active' && !$enabled) {
+                // Determine if plugin matches status filter
+                $is_enabled = !empty($enabled_in);
+                if ($status_filter === 'active' && !$is_enabled) {
                     continue;
                 }
-                if ($status_filter === 'inactive' && $enabled) {
+                if ($status_filter === 'inactive' && $is_enabled) {
                     continue;
                 }
 
                 // Check if plugin is mandatory (cannot be disabled)
                 $can_disable = $plugin->getCanDisable();
-                $enabled_display = !$can_disable ? 'default' : ($enabled ? 'Yes' : 'No');
+                $enabled_display = !$can_disable ? 'default' : ($is_enabled ? 'Yes' : 'No');
 
                 $all_plugins[] = [
                     'name' => $plugin_name,
                     'display_name' => $plugin->getDisplayName(),
                     'category' => $cat,
                     'version' => $this->get_plugin_version_string($plugin),
-                    'enabled' => $enabled_display
+                    'enabled' => $enabled_display,
+                    'enabled_in' => $enabled_in
                 ];
             }
         }
 
         return $all_plugins;
+    }
+
+    /**
+     * Get contexts where a plugin is enabled
+     *
+     * @param object $plugin Plugin object
+     * @param array $journal_contexts Map of journal ID => path
+     * @return string "site-wide", comma-separated context IDs, or empty string
+     */
+    private function get_plugin_enabled_contexts($plugin, $journal_contexts)
+    {
+        $plugin_name = $plugin->getName();
+        $pluginSettingsDao = \PKP\db\DAORegistry::getDAO('PluginSettingsDAO');
+
+        // Check site-wide first
+        $site_enabled = (bool)$pluginSettingsDao->getSetting(
+            \PKP\core\PKPApplication::SITE_CONTEXT_ID,
+            $plugin_name,
+            'enabled'
+        );
+
+        if ($site_enabled) {
+            return 'site-wide';
+        }
+
+        // Check each journal context
+        $enabled_contexts = [];
+        foreach ($journal_contexts as $context_id => $path) {
+            $enabled = (bool)$pluginSettingsDao->getSetting($context_id, $plugin_name, 'enabled');
+            if ($enabled) {
+                $enabled_contexts[] = $path;
+            }
+        }
+
+        return empty($enabled_contexts) ? '' : implode(', ', $enabled_contexts);
     }
 
     /**
@@ -305,7 +401,7 @@ class Plugin_Command
             return;
         }
 
-        $context_id = $this->resolve_context($context_path);
+        $requested_context = $this->resolve_context($context_path);
 
         // Find the plugin
         $plugin_info = $this->find_plugin($plugin_name, $category);
@@ -315,19 +411,14 @@ class Plugin_Command
 
         $found_category = $plugin_info['category'];
 
-        // Load plugin object for this context
-        $plugin = $this->load_plugin_object($found_category, $plugin_name, $context_id);
+        // Load plugin object
+        $plugin = $this->load_plugin_object($found_category, $plugin_name);
         if (!$plugin) {
             OJS_CLI::error("Failed to load plugin: {$plugin_name}");
         }
 
-        // Check if plugin supports site-wide activation
-        if ($context_id === \PKP\core\PKPApplication::SITE_CONTEXT_ID && !$plugin->isSitePlugin()) {
-            OJS_CLI::warning(
-                "Plugin '{$plugin_name}' is not a site-wide plugin.\n" .
-                "Consider using --context=<journal-path> or --all-contexts instead."
-            );
-        }
+        // Resolve the actual context to use
+        $context_id = $this->resolve_plugin_context($plugin, $requested_context);
 
         // Enable plugin using plugin object
         // Check if plugin supports context parameter (like BlockPlugin)
@@ -341,12 +432,15 @@ class Plugin_Command
             $plugin->updateSetting($context_id, 'enabled', true, 'bool');
         }
 
-        // Get journal path for display
-        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
-        $journal = $journal_dao->getById($context_id);
-        $context_msg = $journal ? "journal: " . $journal->getPath() : "context ID {$context_id}";
-
-        OJS_CLI::success("Plugin activated: {$plugin_name} ({$context_msg})");
+        // Display message
+        if ($context_id === \PKP\core\PKPApplication::SITE_CONTEXT_ID) {
+            OJS_CLI::success("Plugin activated: {$plugin_name} (site-wide)");
+        } else {
+            $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
+            $journal = $journal_dao->getById($context_id);
+            $journal_path = $journal ? $journal->getPath() : "context {$context_id}";
+            OJS_CLI::success("Plugin activated: {$plugin_name} (journal: {$journal_path})");
+        }
     }
 
     /**
@@ -391,7 +485,7 @@ class Plugin_Command
             return;
         }
 
-        $context_id = $this->resolve_context($context_path);
+        $requested_context = $this->resolve_context($context_path);
 
         // Find the plugin
         $plugin_info = $this->find_plugin($plugin_name, $category);
@@ -401,8 +495,8 @@ class Plugin_Command
 
         $found_category = $plugin_info['category'];
 
-        // Load plugin object for this context
-        $plugin = $this->load_plugin_object($found_category, $plugin_name, $context_id);
+        // Load plugin object
+        $plugin = $this->load_plugin_object($found_category, $plugin_name);
         if (!$plugin) {
             OJS_CLI::error("Failed to load plugin: {$plugin_name}");
         }
@@ -411,6 +505,9 @@ class Plugin_Command
         if (!$plugin->getCanDisable()) {
             OJS_CLI::error("Plugin '{$plugin_name}' is mandatory and cannot be deactivated.");
         }
+
+        // Resolve the actual context to use
+        $context_id = $this->resolve_plugin_context($plugin, $requested_context);
 
         // Disable plugin using plugin object
         // Check if plugin supports context parameter (like BlockPlugin)
@@ -424,12 +521,15 @@ class Plugin_Command
             $plugin->updateSetting($context_id, 'enabled', false, 'bool');
         }
 
-        // Get journal path for display
-        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
-        $journal = $journal_dao->getById($context_id);
-        $context_msg = $journal ? "journal: " . $journal->getPath() : "context ID {$context_id}";
-
-        OJS_CLI::success("Plugin deactivated: {$plugin_name} ({$context_msg})");
+        // Display message
+        if ($context_id === \PKP\core\PKPApplication::SITE_CONTEXT_ID) {
+            OJS_CLI::success("Plugin deactivated: {$plugin_name} (site-wide)");
+        } else {
+            $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
+            $journal = $journal_dao->getById($context_id);
+            $journal_path = $journal ? $journal->getPath() : "context {$context_id}";
+            OJS_CLI::success("Plugin deactivated: {$plugin_name} (journal: {$journal_path})");
+        }
     }
 
     /**
@@ -464,12 +564,11 @@ class Plugin_Command
      *
      * @param string $category Plugin category
      * @param string $plugin_name Plugin name
-     * @param int|null $context_id Context ID
      * @return object|null Plugin object or null
      */
-    private function load_plugin_object($category, $plugin_name, $context_id = null)
+    private function load_plugin_object($category, $plugin_name)
     {
-        $plugins = \PKP\plugins\PluginRegistry::loadCategory($category, false, $context_id);
+        $plugins = \PKP\plugins\PluginRegistry::loadCategory($category, false);
         foreach ($plugins as $plugin) {
             if ($plugin->getName() === $plugin_name) {
                 return $plugin;
@@ -502,7 +601,7 @@ class Plugin_Command
             $context_id = $journal->getId();
 
             try {
-                $plugin = $this->load_plugin_object($found_category, $plugin_name, $context_id);
+                $plugin = $this->load_plugin_object($found_category, $plugin_name);
                 if ($plugin) {
                     // Use reflection to check if setEnabled accepts context parameter
                     $reflection = new \ReflectionMethod($plugin, 'setEnabled');
@@ -566,7 +665,7 @@ class Plugin_Command
             $context_id = $journal->getId();
 
             try {
-                $plugin = $this->load_plugin_object($found_category, $plugin_name, $context_id);
+                $plugin = $this->load_plugin_object($found_category, $plugin_name);
                 if ($plugin) {
                     if (!$plugin->getCanDisable()) {
                         $results[] = [
@@ -706,11 +805,28 @@ class Plugin_Command
             // Activate if requested
             if ($activate) {
                 OJS_CLI::log("Activating plugin...");
-                $plugin = $this->load_plugin_object($category, $product, $context_id);
+                $plugin = $this->load_plugin_object($category, $product);
                 if ($plugin) {
-                    $plugin->setEnabled(true);
-                    $context_msg = $context_id === \PKP\core\PKPApplication::SITE_CONTEXT_ID ? 'site-wide' : "context ID {$context_id}";
-                    OJS_CLI::success("Plugin activated ({$context_msg})");
+                    // Resolve context for activation
+                    $activation_context = $this->resolve_plugin_context($plugin, $context_id);
+
+                    // Enable plugin
+                    $reflection = new \ReflectionMethod($plugin, 'setEnabled');
+                    $params = $reflection->getParameters();
+                    if (count($params) > 1) {
+                        $plugin->setEnabled(true, $activation_context);
+                    } else {
+                        $plugin->updateSetting($activation_context, 'enabled', true, 'bool');
+                    }
+
+                    if ($activation_context === \PKP\core\PKPApplication::SITE_CONTEXT_ID) {
+                        OJS_CLI::success("Plugin activated (site-wide)");
+                    } else {
+                        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
+                        $journal = $journal_dao->getById($activation_context);
+                        $journal_path = $journal ? $journal->getPath() : "context {$activation_context}";
+                        OJS_CLI::success("Plugin activated (journal: {$journal_path})");
+                    }
                 } else {
                     OJS_CLI::warning("Plugin installed but could not be activated automatically");
                 }
