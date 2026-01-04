@@ -4,7 +4,20 @@ A standalone CLI tool for OJS (Open Journal Systems) modeled after WordPress's W
 
 ## Status
 
-🚧 **In Development** - Currently implementing Phase 1 (Core Framework)
+✅ **Functional** - Core plugin management commands working
+
+**Completed Features**:
+- ✅ Plugin list with filtering, update checking, and multiple output formats
+- ✅ Plugin info (detailed information)
+- ✅ Plugin activate/deactivate with context awareness
+- ✅ Plugin install from local file
+- ✅ Plugin delete with confirmation
+- ✅ Plugin upgrade (from file and gallery)
+
+**Pending**:
+- ⏳ Plugin install from gallery
+- ⏳ Configuration file support (needs testing)
+- ⏳ Unit tests
 
 ## Quick Overview
 
@@ -19,47 +32,83 @@ A standalone CLI tool for OJS (Open Journal Systems) modeled after WordPress's W
 
 **Target Version**: OJS 3.5
 
-## Planned Commands
+## Available Commands
 
 ### Plugin Management
 
 ```bash
-# List all plugins
+# List all plugins (✅ working)
 ojs plugin list
 
-# List plugins in JSON format
+# List plugins in JSON format (✅ working)
 ojs plugin list --format=json
 
-# List plugins for specific journal
+# List plugins for specific journal (✅ working)
 ojs plugin list --context=my-journal
 
-# Activate plugin
+# Filter by status (✅ working)
+ojs plugin list --status=active
+
+# Show detailed plugin info (✅ working)
+ojs plugin info customBlockManager
+
+# Activate plugin (✅ working)
 ojs plugin activate customBlockManager
 
-# Activate for all journals
+# Activate for all journals (✅ working)
 ojs plugin activate customBlockManager --all-contexts
 
-# Deactivate plugin
+# Activate for specific journal (✅ working)
+ojs plugin activate customBlockManager --context=my-journal
+
+# Deactivate plugin (✅ working)
 ojs plugin deactivate customBlockManager
 
-# Install from gallery
-ojs plugin install customBlockManager
-
-# Install from local file
+# Install from local file (✅ working)
 ojs plugin install /path/to/plugin.tar.gz
 
-# Install and activate
-ojs plugin install customBlockManager --activate
+# Install and activate (✅ working)
+ojs plugin install /path/to/plugin.tar.gz --activate
 
-# Delete plugin
+# Install from gallery (⚠️ not yet implemented)
+# ojs plugin install customBlockManager
+
+# Delete plugin (✅ working)
 ojs plugin delete customBlockManager
 
-# Upgrade plugin
+# Delete without confirmation (✅ working)
+ojs plugin delete customBlockManager --force
+
+# Upgrade plugin from gallery (✅ working)
 ojs plugin upgrade customBlockManager
 
-# Upgrade all plugins
-ojs plugin upgrade all
+# Upgrade from local file (✅ working)
+ojs plugin upgrade /path/to/plugin.tar.gz
+
+# Force upgrade even if version appears current (✅ working)
+ojs plugin upgrade customBlockManager --force
 ```
+
+### Key Features
+
+**Plugin List Enhancements**:
+- Shows `enabled_in` column (site-wide or journal paths where plugin is enabled)
+- Shows `update` and `update_version` columns for available updates
+- Mandatory plugins show "default" in enabled column
+- Auto-detects site-wide plugins via version.xml
+
+**Context Awareness**:
+- Auto-detects if plugin is site-wide (reads `<sitewide>` tag from version.xml)
+- Defaults to appropriate context for journal-specific plugins
+- Override with `--context=<journal-path>` or `--context=site-wide`
+
+**Plugin Name Matching**:
+- Fuzzy matching handles variations (e.g., "shariff" vs "shariffplugin")
+
+**Error Handling**:
+- Debug mode: Set `OJS_CLI_DEBUG=1` environment variable for verbose errors
+- Colorized warnings and error messages
+- Transaction rollback on database operation failures
 
 ## Architecture
 
