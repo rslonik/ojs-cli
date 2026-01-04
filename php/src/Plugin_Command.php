@@ -541,6 +541,8 @@ class Plugin_Command
     /**
      * Find a plugin by name
      *
+     * Handles plugin name variations (e.g., "shariff" vs "shariffplugin")
+     *
      * @param string $plugin_name Plugin name
      * @param string|null $category Optional category to search
      * @return array|null Plugin info or null if not found
@@ -549,6 +551,7 @@ class Plugin_Command
     {
         $categories = $category ? [$category] : \PKP\plugins\PluginRegistry::getCategories();
 
+        // Try to find plugin with exact name match first
         foreach ($categories as $cat) {
             $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
             foreach ($plugins as $plugin) {
@@ -558,6 +561,40 @@ class Plugin_Command
                         'category' => $cat,
                         'plugin' => $plugin
                     ];
+                }
+            }
+        }
+
+        // If not found, try with "plugin" suffix (e.g., "shariff" -> "shariffplugin")
+        if (!preg_match('/(plugin|Plugin)$/i', $plugin_name)) {
+            $plugin_name_with_suffix = $plugin_name . 'plugin';
+            foreach ($categories as $cat) {
+                $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
+                foreach ($plugins as $plugin) {
+                    if ($plugin->getName() === $plugin_name_with_suffix) {
+                        return [
+                            'name' => $plugin_name_with_suffix,
+                            'category' => $cat,
+                            'plugin' => $plugin
+                        ];
+                    }
+                }
+            }
+        }
+
+        // If not found, try without "plugin" suffix (e.g., "shariffplugin" -> "shariff")
+        if (preg_match('/(plugin|Plugin)$/i', $plugin_name)) {
+            $plugin_name_without_suffix = preg_replace('/(plugin|Plugin)$/i', '', $plugin_name);
+            foreach ($categories as $cat) {
+                $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
+                foreach ($plugins as $plugin) {
+                    if ($plugin->getName() === $plugin_name_without_suffix) {
+                        return [
+                            'name' => $plugin_name_without_suffix,
+                            'category' => $cat,
+                            'plugin' => $plugin
+                        ];
+                    }
                 }
             }
         }
@@ -641,7 +678,7 @@ class Plugin_Command
         OJS_CLI::line('');
         OJS_CLI::line("Activated '{$plugin_name}' for journals:");
         foreach ($results as $result) {
-            $status_icon = $result['status'] === 'success' ? '[32m✓[0m' : '[31m✗[0m';
+            $status_icon = $result['status'] === 'success' ? OJS_CLI::colorize('✓', 'green') : OJS_CLI::colorize('✗', 'red');
             $message = $result['status'] === 'success' ? '' : ' - ' . $result['message'];
             OJS_CLI::line("  {$status_icon} {$result['journal']}{$message}");
         }
@@ -713,7 +750,7 @@ class Plugin_Command
         OJS_CLI::line('');
         OJS_CLI::line("Deactivated '{$plugin_name}' for journals:");
         foreach ($results as $result) {
-            $status_icon = $result['status'] === 'success' ? '[32m✓[0m' : '[31m✗[0m';
+            $status_icon = $result['status'] === 'success' ? OJS_CLI::colorize('✓', 'green') : OJS_CLI::colorize('✗', 'red');
             $message = $result['status'] === 'success' ? '' : ' - ' . $result['message'];
             OJS_CLI::line("  {$status_icon} {$result['journal']}{$message}");
         }
@@ -890,8 +927,8 @@ class Plugin_Command
 
         // Confirm with user unless --force
         if (!$force) {
-            OJS_CLI::line("[33mWarning:[0m This will permanently delete the plugin '{$plugin_name}'.");
-            OJS_CLI::line('Type "yes" to confirm: ');
+            fwrite(STDERR, OJS_CLI::colorize('Warning:', 'yellow') . " This will permanently delete the plugin '{$plugin_name}'.\n");
+            fwrite(STDERR, 'Type "yes" to confirm: ');
             $confirmation = trim(fgets(STDIN));
 
             if (strtolower($confirmation) !== 'yes') {
@@ -900,41 +937,332 @@ class Plugin_Command
             }
         }
 
+        // Load plugin object to get actual path
+        $plugin_obj = $plugin['plugin'];
+        $plugin_path = $plugin_obj->getPluginPath();
+
         // Get version info
         $versionDao = \PKP\db\DAORegistry::getDAO('VersionDAO');
-        $version = $versionDao->getCurrentVersion("plugins.{$found_category}", $plugin_name);
+        $version = $versionDao->getCurrentVersion("plugins.{$found_category}", basename($plugin_path));
 
-        // Delete plugin files
+
+        // Delete version record from database
+        OJS_CLI::log("before");
+        if ($version) {
+            $versionDao->disableVersion("plugins.{$found_category}", basename($plugin_path));
+            OJS_CLI::log("Disabled plugin version in database");
+        }
+
+        // Delete plugin settings from database
+        \Illuminate\Support\Facades\DB::table('plugin_settings')
+            ->where('plugin_name', $plugin_name)
+            ->delete();
+        OJS_CLI::log("Deleted plugin settings from database");
+       
+        // Delete plugin files using actual plugin path
         $fileManager = new \PKP\file\FileManager();
-        $baseDir = \PKP\core\Core::getBaseDir();
-
         $deleted_files = false;
 
-        // Try both possible locations
-        $locations = [
-            "{$baseDir}/plugins/{$found_category}/{$plugin_name}",
-            "{$baseDir}/lib/pkp/plugins/{$found_category}/{$plugin_name}"
-        ];
-
-        foreach ($locations as $location) {
-            if (is_dir($location)) {
-                OJS_CLI::log("Deleting files from: {$location}");
-                $fileManager->rmtree($location);
-                $deleted_files = true;
-            }
+        if ($plugin_path && is_dir($plugin_path)) {
+            OJS_CLI::log("Deleting files from: {$plugin_path}");
+            $fileManager->rmtree($plugin_path);
+            $deleted_files = true;
         }
 
         if (!$deleted_files) {
             OJS_CLI::warning("No plugin files found to delete (may be already removed)");
         }
 
-        // Disable version in database
-        if ($version) {
-            $versionDao->disableVersion("plugins.{$found_category}", $plugin_name);
-            OJS_CLI::log("Disabled plugin version in database");
+        OJS_CLI::success("Plugin deleted: {$plugin_name}");
+    }
+
+    /**
+     * Upgrades a plugin
+     *
+     * ## OPTIONS
+     *
+     * <plugin>
+     * : Plugin name to upgrade OR path to plugin archive file
+     *
+     * [--category=<category>]
+     * : Plugin category (if known, for faster lookup)
+     *
+     * [--force]
+     * : Skip version check and force upgrade
+     *
+     * ## EXAMPLES
+     *
+     *   # Upgrade plugin from gallery
+     *   $ ojs plugin upgrade shariffplugin
+     *
+     *   # Upgrade from local file
+     *   $ ojs plugin upgrade /path/to/plugin.tar.gz
+     *
+     *   # Force upgrade even if version appears current
+     *   $ ojs plugin upgrade shariffplugin --force
+     */
+    public function upgrade($args, $assoc_args)
+    {
+        $plugin_source = $args[0] ?? null;
+        if (!$plugin_source) {
+            OJS_CLI::error('Plugin name or path required');
         }
 
-        OJS_CLI::success("Plugin deleted: {$plugin_name}");
+        $category = $assoc_args['category'] ?? null;
+        $force = isset($assoc_args['force']);
+
+        // Check if it's a file path
+        if (file_exists($plugin_source)) {
+            $this->upgrade_from_file($plugin_source, $category, $force);
+        } else {
+            $this->upgrade_from_gallery($plugin_source, $category, $force);
+        }
+    }
+
+    /**
+     * Upgrade plugin from local file
+     *
+     * @param string $file_path Path to plugin archive
+     * @param string|null $category Plugin category
+     * @param bool $force Force upgrade
+     */
+    private function upgrade_from_file($file_path, $category, $force)
+    {
+        if (!file_exists($file_path)) {
+            OJS_CLI::error("File not found: {$file_path}");
+        }
+
+        if (!is_readable($file_path)) {
+            OJS_CLI::error("File not readable: {$file_path}");
+        }
+
+        // Parse the archive to get plugin info
+        OJS_CLI::log("Reading plugin archive...");
+
+        try {
+            $pluginHelper = new \PKP\plugins\PluginHelper();
+            $versionInfo = $this->get_version_from_archive($file_path, basename($file_path));
+
+            $plugin_name = $versionInfo['product'];
+            $new_version = $versionInfo['version'];
+            $plugin_category = str_replace('plugins.', '', $versionInfo['productType']);
+
+            // Verify category if specified
+            if ($category && $category !== $plugin_category) {
+                OJS_CLI::error("Category mismatch: archive is '{$plugin_category}' but you specified '{$category}'");
+            }
+
+            // Find the plugin
+            $plugin_info = $this->find_plugin($plugin_name, $plugin_category);
+            if (!$plugin_info) {
+                OJS_CLI::error("Plugin not installed: {$plugin_name}. Use 'ojs plugin install' instead.");
+            }
+
+            // Get current version
+            $versionDao = \PKP\db\DAORegistry::getDAO('VersionDAO');
+            $current_version = $versionDao->getCurrentVersion("plugins.{$plugin_category}", $plugin_name);
+
+            if (!$current_version) {
+                OJS_CLI::error("Plugin not installed: {$plugin_name}. Use 'ojs plugin install' instead.");
+            }
+
+            $current_version_string = $current_version->getVersionString();
+
+            // Check version comparison unless forced
+            if (!$force) {
+                if (version_compare($new_version, $current_version_string, '<=')) {
+                    OJS_CLI::error(
+                        "Upgrade cancelled: New version ({$new_version}) is not newer than installed version ({$current_version_string}).\n" .
+                        "Use --force to upgrade anyway."
+                    );
+                }
+            }
+
+            OJS_CLI::log("Upgrading {$plugin_name} from {$current_version_string} to {$new_version}...");
+
+            // Perform upgrade using PluginHelper
+            // Note: upgradePlugin expects the database product name (without "plugin" suffix)
+            \Illuminate\Support\Facades\DB::beginTransaction();
+
+            try {
+                $version = $pluginHelper->upgradePlugin($plugin_category, $plugin_name, $file_path, basename($file_path));
+
+                \Illuminate\Support\Facades\DB::commit();
+
+                OJS_CLI::success("Plugin upgraded: {$plugin_name} (version {$version->getVersionString()})");
+            } catch (\Exception $e) {
+                if (\Illuminate\Support\Facades\DB::transactionLevel() > 0) {
+                    \Illuminate\Support\Facades\DB::rollback();
+                }
+                OJS_CLI::error("Upgrade failed: " . $e->getMessage());
+            }
+        } catch (\Exception $e) {
+            OJS_CLI::error("Failed to read plugin archive: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Upgrade plugin from gallery
+     *
+     * @param string $plugin_name Plugin name
+     * @param string|null $category Plugin category
+     * @param bool $force Force upgrade
+     */
+    private function upgrade_from_gallery($plugin_name, $category, $force)
+    {
+        // Find the plugin
+        $plugin_info = $this->find_plugin($plugin_name, $category);
+        if (!$plugin_info) {
+            OJS_CLI::error("Plugin not found: {$plugin_name}");
+        }
+
+        $found_category = $plugin_info['category'];
+        $plugin_obj = $plugin_info['plugin'];
+
+        // Normalize plugin name for database lookup (remove "plugin" suffix)
+        // Gallery and database use "shariff" but getName() returns "shariffplugin"
+        $db_plugin_name = preg_replace('/(plugin|Plugin)$/i', '', $plugin_name);
+
+        // Get current version using normalized name
+        $versionDao = \PKP\db\DAORegistry::getDAO('VersionDAO');
+        $current_version = $versionDao->getCurrentVersion("plugins.{$found_category}", $db_plugin_name);
+
+        if (!$current_version) {
+            OJS_CLI::error("Plugin not installed: {$plugin_name}. Use 'ojs plugin install' instead.");
+        }
+
+        $current_version_string = $current_version->getVersionString();
+
+        // Check for available update from gallery
+        OJS_CLI::log("Checking plugin gallery for updates...");
+
+        try {
+            $pluginGalleryDao = \PKP\db\DAORegistry::getDAO('PluginGalleryDAO');
+            $application = \APP\core\Application::get();
+
+            // Search for specific plugin using normalized name
+            $plugins = $pluginGalleryDao->getNewestCompatible($application, $found_category, $db_plugin_name);
+
+            $galleryPlugin = null;
+            foreach ($plugins as $gp) {
+                if ($gp->getProduct() === $db_plugin_name) {
+                    $galleryPlugin = $gp;
+                    break;
+                }
+            }
+
+            if (!$galleryPlugin) {
+                OJS_CLI::error("Plugin not found in gallery or not compatible with your OJS version.");
+            }
+
+            $available_version = $galleryPlugin->getVersion();
+
+            // Check if upgrade is needed unless forced
+            if (!$force) {
+                if (version_compare($available_version, $current_version_string, '<=')) {
+                    OJS_CLI::line("Plugin is already at the latest version ({$current_version_string}).");
+                    return;
+                }
+            }
+
+            OJS_CLI::log("Found update: {$available_version} (current: {$current_version_string})");
+
+            // Download the plugin
+            $download_url = $galleryPlugin->getReleasePackage();
+            OJS_CLI::log("Downloading from: {$download_url}");
+
+            $temp_file = $this->download_plugin($download_url, $db_plugin_name);
+
+            try {
+                // Upgrade using local file method
+                $this->upgrade_from_file($temp_file, $found_category, true); // Force=true since we already checked
+
+                // Cleanup temp file
+                unlink($temp_file);
+            } catch (\Exception $e) {
+                // Cleanup temp file on error
+                if (file_exists($temp_file)) {
+                    unlink($temp_file);
+                }
+                throw $e;
+            }
+        } catch (\Exception $e) {
+            OJS_CLI::error("Failed to upgrade from gallery: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Download plugin from URL
+     *
+     * @param string $url Download URL
+     * @param string $plugin_name Plugin name for temp file naming
+     * @return string Path to downloaded file
+     */
+    private function download_plugin($url, $plugin_name)
+    {
+        $application = \APP\core\Application::get();
+        $client = $application->getHttpClient();
+
+        try {
+            $response = $client->request('GET', $url, ['timeout' => 60]);
+            $content = $response->getBody();
+
+            // Create temp file
+            $temp_file = tempnam(sys_get_temp_dir(), "ojs_plugin_{$plugin_name}_") . '.tar.gz';
+            file_put_contents($temp_file, $content);
+
+            return $temp_file;
+        } catch (\Exception $e) {
+            OJS_CLI::error("Failed to download plugin: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Get version info from plugin archive
+     *
+     * @param string $filePath Path to archive
+     * @param string $originalFileName Original filename
+     * @return array Version info
+     */
+    private function get_version_from_archive($filePath, $originalFileName)
+    {
+        $fileManager = new \PKP\file\FileManager();
+        $extension = $fileManager->parseFileExtension($originalFileName);
+        $baseName = basename($originalFileName, ".{$extension}") ?: 'plugin';
+
+        // Extract to temp directory
+        $extractPath = rtrim(sys_get_temp_dir(), '\\/') . "/{$baseName}" . substr(md5(random_int(0, PHP_INT_MAX)), 0, 10) . '/';
+        $fileManager->mkdir($extractPath);
+
+        try {
+            // Extract files
+            (new \PharData($filePath))->extractTo($extractPath, null, true);
+
+            // Find version.xml
+            foreach (new \DirectoryIterator($extractPath) as $current) {
+                if ($current->isDir() && $current->getBasename() !== '..' &&
+                    is_file(($path = "{$current->getPathname()}/") . 'version.xml')) {
+
+                    $versionFile = $path . 'version.xml';
+                    $versionInfo = \PKP\site\VersionCheck::parseVersionXML($versionFile);
+
+                    // Cleanup
+                    $fileManager->rmtree($extractPath);
+
+                    return [
+                        'product' => $versionInfo['application'], // parseVersionXML returns 'application'
+                        'productType' => $versionInfo['type'],     // parseVersionXML returns 'type'
+                        'version' => $versionInfo['release']
+                    ];
+                }
+            }
+
+            throw new \Exception('version.xml not found in archive');
+        } finally {
+            if (is_dir($extractPath)) {
+                $fileManager->rmtree($extractPath);
+            }
+        }
     }
 
     /**

@@ -22,6 +22,9 @@ class ConfigureRunner implements BootstrapStep
         // Parse command line arguments for config
         $config = $this->parse_config($state->argv);
 
+        // Configure colorization based on TTY detection
+        $this->configure_colors();
+
         // Create runner
         $runner = new Runner($config);
 
@@ -39,6 +42,17 @@ class ConfigureRunner implements BootstrapStep
 
         $state->runner = $runner;
         $state->config = $config;
+    }
+
+    /**
+     * Configure color output based on environment
+     */
+    private function configure_colors(): void
+    {
+        // Auto-detect TTY for colorization
+        // Disable colors if output is being piped or redirected
+        $is_tty = function_exists('posix_isatty') && posix_isatty(STDOUT);
+        \OJS_CLI::set_colorize($is_tty);
     }
 
     /**
