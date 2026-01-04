@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+
+# OJS-CLI - Command-line interface for Open Journal Systems
+# Modeled after WP-CLI for WordPress
+
+# Resolve symlinks to find actual ojs-cli location
+SELF_PATH="$(cd -P -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")"
+while [ -h "$SELF_PATH" ]; do
+    DIR="$(dirname -- "$SELF_PATH")"
+    SYM="$(readlink "$SELF_PATH")"
+    SELF_PATH="$(cd "$DIR" && cd "$(dirname -- "$SYM")" && pwd)/$(basename -- "$SYM")"
+done
+
+# Use OJS_CLI_PHP env var or find php on PATH
+php="${OJS_CLI_PHP:-$(command -v php)}"
+
+# Check if PHP is available
+if [ -z "$php" ]; then
+    echo "Error: PHP not found in PATH" >&2
+    echo "Set OJS_CLI_PHP environment variable to specify PHP binary" >&2
+    exit 1
+fi
+
+# Check PHP version (require 8.1+)
+required_version="8.1"
+php_version=$("$php" -r 'echo PHP_VERSION;' 2>/dev/null)
+
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to determine PHP version" >&2
+    exit 1
+fi
+
+# Version comparison
+if ! "$php" -r "exit(version_compare(PHP_VERSION, '$required_version', '>=') ? 0 : 1);" 2>/dev/null; then
+    echo "Error: PHP $required_version or higher is required. Found: $php_version" >&2
+    exit 1
+fi
+
+# Execute boot.php
+SCRIPT_PATH="$(dirname "$SELF_PATH")/../php/boot.php"
+
+if [ ! -f "$SCRIPT_PATH" ]; then
+    echo "Error: boot.php not found at: $SCRIPT_PATH" >&2
+    exit 1
+fi
+
+export OJS_CLI_PHP_USED="$php"
+exec "$php" $OJS_CLI_PHP_ARGS "$SCRIPT_PATH" "$@"
