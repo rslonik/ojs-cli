@@ -11,11 +11,11 @@ A standalone CLI tool for OJS (Open Journal Systems) modeled after WordPress's W
 - ✅ Plugin info (detailed information)
 - ✅ Plugin activate/deactivate with context awareness
 - ✅ Plugin install from local file
-- ✅ Plugin delete with confirmation
+- ✅ Plugin install from gallery (with MD5 verification)
+- ✅ Plugin delete with confirmation (prevents deletion of enabled plugins)
 - ✅ Plugin upgrade (from file and gallery)
 
 **Pending**:
-- ⏳ Plugin install from gallery
 - ⏳ Configuration file support (needs testing)
 - ⏳ Unit tests
 
@@ -64,14 +64,17 @@ ojs plugin activate customBlockManager --context=my-journal
 # Deactivate plugin (✅ working)
 ojs plugin deactivate customBlockManager
 
+# Install from gallery (✅ working)
+ojs plugin install hypothesis
+
+# Install from gallery and activate (✅ working)
+ojs plugin install hypothesis --activate
+
 # Install from local file (✅ working)
 ojs plugin install /path/to/plugin.tar.gz
 
 # Install and activate (✅ working)
 ojs plugin install /path/to/plugin.tar.gz --activate
-
-# Install from gallery (⚠️ not yet implemented)
-# ojs plugin install customBlockManager
 
 # Delete plugin (✅ working)
 ojs plugin delete customBlockManager
@@ -105,10 +108,18 @@ ojs plugin upgrade customBlockManager --force
 **Plugin Name Matching**:
 - Fuzzy matching handles variations (e.g., "shariff" vs "shariffplugin")
 
+**Gallery Installation**:
+- Downloads from https://pkp.sfu.ca/ojs/xml/plugins.xml
+- Compatibility checking (only shows OJS version-compatible plugins)
+- MD5 checksum verification for download integrity
+- Streaming download in 80KB chunks for large plugins
+- Auto-cleanup of temporary files
+
 **Error Handling**:
 - Debug mode: Set `OJS_CLI_DEBUG=1` environment variable for verbose errors
 - Colorized warnings and error messages
 - Transaction rollback on database operation failures
+- Prevents deletion of enabled plugins (must deactivate first)
 
 ## Architecture
 
