@@ -773,6 +773,12 @@ class Plugin_Command
      *
      * ## EXAMPLES
      *
+     *   # Install from gallery
+     *   $ ojs plugin install customBlockManager
+     *
+     *   # Install from gallery and activate
+     *   $ ojs plugin install customBlockManager --activate
+     *
      *   # Install from local file
      *   $ ojs plugin install /path/to/plugin.tar.gz
      *
@@ -797,7 +803,8 @@ class Plugin_Command
         if (file_exists($plugin_source)) {
             $this->install_from_file($plugin_source, $activate, $context_id);
         } else {
-            OJS_CLI::error("Plugin installation from gallery not yet implemented. Use file path instead.");
+            // Install from gallery
+            $this->install_from_gallery($plugin_source, $activate, $context_id);
         }
     }
 
@@ -884,6 +891,75 @@ class Plugin_Command
             OJS_CLI::error("Installation failed: " . $e->getMessage());
         }
     }
+
+    /**
+     * Install plugin from gallery
+     *
+     * @param string $plugin_name Plugin name
+     * @param bool $activate Activate after installation
+     * @param int|null $context_id Context ID for activation
+     */
+    private function install_from_gallery($plugin_name, $activate, $context_id)
+    {
+        OJS_CLI::log("Searching plugin gallery for: {$plugin_name}");
+
+        // Get application instance
+        $application = \APP\core\Application::get();
+
+        // Get plugin gallery DAO
+        $pluginGalleryDao = \PKP\db\DAORegistry::getDAO('PluginGalleryDAO');
+
+        // Normalize plugin name (remove "plugin" suffix if present)
+        $search_name = preg_replace('/(plugin|Plugin)$/i', '', $plugin_name);
+
+        // Search for compatible plugins
+        $plugins = $pluginGalleryDao->getNewestCompatible($application, null, $search_name);
+
+        // Find the requested plugin
+        $galleryPlugin = null;
+        foreach ($plugins as $plugin) {
+            if ($plugin->getProduct() === $search_name) {
+                $galleryPlugin = $plugin;
+                break;
+            }
+        }
+
+        if (!$galleryPlugin) {
+            OJS_CLI::error(
+                "Plugin '{$plugin_name}' not found in gallery or not compatible with this OJS version.\n" .
+                "Search term used: {$search_name}\n" .
+                "Try 'ojs plugin list' to see installed plugins or check https://pkp.sfu.ca/plugin-gallery/"
+            );
+        }
+
+        // Get plugin details
+        $category = $galleryPlugin->getCategory();
+        $product = $galleryPlugin->getProduct();
+        $version = $galleryPlugin->getVersion();
+        $package_url = $galleryPlugin->getReleasePackage();
+        $expected_md5 = $galleryPlugin->getReleaseMD5();
+
+        OJS_CLI::log("Found plugin: {$product} v{$version} ({$category})");
+        OJS_CLI::log("Downloading from: {$package_url}");
+
+        // Download plugin to temp file
+        try {
+            $temp_file = $this->download_plugin($package_url, $expected_md5);
+
+            // Install from downloaded file
+            $this->install_from_file($temp_file, $activate, $context_id);
+
+            // Clean up temp file
+            if (file_exists($temp_file)) {
+                unlink($temp_file);
+                OJS_CLI::log("Cleaned up temporary file");
+            }
+
+        } catch (\Exception $e) {
+            OJS_CLI::error("Gallery installation failed: " . $e->getMessage());
+        }
+    }
+
 
     /**
      * Deletes a plugin
@@ -1220,28 +1296,85 @@ class Plugin_Command
     }
 
     /**
-     * Download plugin from URL
+     * Download plugin from URL with optional MD5 verification
      *
      * @param string $url Download URL
-     * @param string $plugin_name Plugin name for temp file naming
+     * @param string $plugin_name_or_md5 Plugin name for temp file naming OR expected MD5
      * @return string Path to downloaded file
+     * @throws \Exception on download or verification failure
      */
-    private function download_plugin($url, $plugin_name)
+    private function download_plugin($url, $plugin_name_or_md5 = null)
     {
         $application = \APP\core\Application::get();
         $client = $application->getHttpClient();
 
-        try {
-            $response = $client->request('GET', $url, ['timeout' => 60]);
-            $content = $response->getBody();
+        // Determine if second param is MD5 (32 hex chars) or plugin name
+        $expected_md5 = null;
+        $plugin_name = 'plugin';
+        if ($plugin_name_or_md5) {
+            if (preg_match('/^[a-f0-9]{32}$/i', $plugin_name_or_md5)) {
+                $expected_md5 = strtolower($plugin_name_or_md5);
+            } else {
+                $plugin_name = $plugin_name_or_md5;
+            }
+        }
 
-            // Create temp file
-            $temp_file = tempnam(sys_get_temp_dir(), "ojs_plugin_{$plugin_name}_") . '.tar.gz';
-            file_put_contents($temp_file, $content);
+        // Create temp file
+        $temp_file = tempnam(sys_get_temp_dir(), "ojs_plugin_{$plugin_name}_") . '.tar.gz';
+        if ($temp_file === false) {
+            throw new \Exception("Failed to create temporary file");
+        }
+
+        OJS_CLI::log("Downloading plugin...");
+
+        try {
+            // Download plugin
+            $response = $client->request('GET', $url, ['timeout' => 120]);
+            $body = $response->getBody();
+
+            // Write to temp file in chunks (same as OJS implementation)
+            $file = fopen($temp_file, 'w');
+            if ($file === false) {
+                throw new \Exception("Failed to open temporary file for writing");
+            }
+
+            $bytes_written = 0;
+            while (!$body->eof()) {
+                $chunk = $body->read(80 << 10); // 80KB chunks
+                if (fwrite($file, $chunk) === false) {
+                    fclose($file);
+                    throw new \Exception("Failed to write to temporary file");
+                }
+                $bytes_written += strlen($chunk);
+            }
+
+            fclose($file);
+
+            OJS_CLI::log("Downloaded " . round($bytes_written / 1024, 2) . " KB");
+
+            // Verify MD5 checksum if provided
+            if ($expected_md5) {
+                $actual_md5 = md5_file($temp_file);
+                if ($actual_md5 !== $expected_md5) {
+                    unlink($temp_file);
+                    throw new \Exception(
+                        "Integrity validation failed!\n" .
+                        "Expected MD5: {$expected_md5}\n" .
+                        "Received MD5: {$actual_md5}\n" .
+                        "The downloaded file may be corrupted or tampered with."
+                    );
+                }
+                OJS_CLI::log("MD5 checksum verified");
+            }
 
             return $temp_file;
+
         } catch (\Exception $e) {
-            OJS_CLI::error("Failed to download plugin: " . $e->getMessage());
+            // Clean up temp file on error
+            if (file_exists($temp_file)) {
+                unlink($temp_file);
+            }
+            throw $e;
         }
     }
 
