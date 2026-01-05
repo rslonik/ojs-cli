@@ -16,7 +16,7 @@ Build a standalone CLI tool for OJS (Open Journal Systems) modeled after WordPre
 
 ## 🎯 Current Implementation Status
 
-**Last Updated**: 2026-01-04
+**Last Updated**: 2026-01-05
 
 ### Working Commands
 
@@ -43,8 +43,8 @@ Build a standalone CLI tool for OJS (Open Journal Systems) modeled after WordPre
 - **Phase 6**: Install from Gallery - ✅ COMPLETED
 - **Phase 7**: Plugin Delete - ✅ COMPLETED
 - **Phase 8**: Plugin Upgrade - ✅ COMPLETED (both file and gallery)
-- **Phase 9**: Configuration & Polish - ⚠️ PARTIALLY COMPLETED
-- **Phase 10**: Testing & Packaging - ⏳ NOT STARTED
+- **Phase 9**: Configuration & Polish - ✅ COMPLETED
+- **Phase 10**: Testing & Packaging - ⏳ IN PROGRESS
 
 ### Key Enhancements Beyond Original Plan
 
@@ -52,17 +52,19 @@ Build a standalone CLI tool for OJS (Open Journal Systems) modeled after WordPre
 2. **Update Checking**: Shows available updates in `ojs plugin list` via PluginGalleryDAO
 3. **Enabled Context Tracking**: New `enabled_in` column shows where plugins are active
 4. **Mandatory Plugin Handling**: Shows "default" for plugins that can't be disabled
-5. **Plugin Name Fuzzy Matching**: Handles variations like "shariff" vs "shariffplugin"
+5. **Directory Name Identifiers**: Uses directory names (e.g., "shariff") instead of class names (e.g., "shariffplugin")
 6. **Reflection-based Activation**: Detects setEnabled() signature to call correctly
 7. **Colorized Output**: Uses OJS_CLI::colorize for warnings and errors
 8. **Debug Mode**: OJS_CLI_DEBUG environment variable for verbose error reporting
 9. **Version Reading**: Falls back to version.xml when VersionDAO has no record
 10. **Transaction Handling**: Proper rollback on DB operations failure
+11. **Delete Protection**: Prevents deletion of enabled plugins with helpful error message
 
-### Known Limitations
+### Known Limitations & Breaking Changes
 
+- **BREAKING**: Plugin commands now ONLY accept directory names (e.g., `shariff`), not class names (e.g., `shariffplugin`)
 - Configuration file support exists but not fully tested
-- No unit tests yet
+- Manual testing only (no automated unit tests yet)
 - Auto-activation after gallery install may require manual activation
 
 ---
@@ -1005,29 +1007,11 @@ interface BootstrapStep {
 - ✅ Integration with PluginHelper
 
 **Critical Implementation**:
-```php
-// ✅ Implemented: DB operations first (can rollback)
-DB::beginTransaction();
-try {
-    $pluginHelper = new \PKP\plugins\PluginHelper();
-    $version = $pluginHelper->installPlugin($file_path, basename($file_path));
-
-    DB::commit();
-
-    // Activate if requested (after commit)
-    if ($activate) {
-        // Uses reflection and context resolution
-        $plugin = $this->load_plugin_object($category, $product);
-        $activation_context = $this->resolve_plugin_context($plugin, $context_id);
-        // ... setEnabled with reflection
-    }
-} catch (Exception $e) {
-    if (DB::transactionLevel() > 0) {
-        DB::rollback();
-    }
-    OJS_CLI::error("Installation failed: " . $e->getMessage());
-}
-```
+- Uses PluginHelper::installPlugin() for core installation logic
+- Transaction handling: DB operations first (can rollback), then filesystem
+- Activation uses reflection to detect setEnabled() signature
+- Context resolution auto-detects site-wide vs journal-specific
+- Proper error handling and rollback on failure
 
 **Validation**:
 - ✅ Install from file: `ojs plugin install /tmp/plugin.tar.gz`
@@ -1057,26 +1041,12 @@ try {
 - ✅ Integration with `PluginGalleryDAO`
 
 **Implementation**:
-```php
-// ✅ Implemented
-// 1. Query gallery for plugin using PluginGalleryDAO::getNewestCompatible()
-$plugins = $pluginGalleryDao->getNewestCompatible($application, null, $search_name);
-
-// 2. Check compatibility (done by PluginGalleryDAO)
-// 3. Download to temp file with streaming
-$temp_file = $this->download_plugin($package_url, $expected_md5);
-
-// 4. Verify MD5 checksum
-if (md5_file($temp_file) !== $expected_md5) {
-    throw new Exception("Integrity validation failed");
-}
-
-// 5. Install using local file method
-$this->install_from_file($temp_file, $activate, $context_id);
-
-// 6. Cleanup temp file
-unlink($temp_file);
-```
+- Query gallery using PluginGalleryDAO::getNewestCompatible() for automatic compatibility checking
+- Download plugin package with streaming (80KB chunks like OJS)
+- Verify MD5 checksum for download integrity
+- Reuse install_from_file() method for actual installation
+- Auto-cleanup of temporary files
+- Plugin name uses directory name (no "plugin" suffix normalization needed)
 
 **Validation**:
 - ✅ Install from gallery: `ojs plugin install hypothesis`
@@ -1104,31 +1074,13 @@ unlink($temp_file);
 - ✅ `php/src/Plugin_Command.php` (delete method)
 
 **Implementation**:
-```php
-// ✅ Implemented with improvements
-if (!$force) {
-    fwrite(STDERR, OJS_CLI::colorize('Warning:', 'yellow') . " This will permanently delete...\n");
-    fwrite(STDERR, 'Type "yes" to confirm: ');
-    $confirmation = trim(fgets(STDIN));
-    if (strtolower($confirmation) !== 'yes') {
-        return;
-    }
-}
-
-// Get actual plugin path from plugin object
-$plugin_obj = $plugin['plugin'];
-$plugin_path = $plugin_obj->getPluginPath();
-
-// Disable version in database
-$versionDao->disableVersion("plugins.{$category}", basename($plugin_path));
-
-// Delete plugin settings
-DB::table('plugin_settings')->where('plugin_name', $plugin_name)->delete();
-
-// Delete files from actual path
-$fileManager = new \PKP\file\FileManager();
-$fileManager->rmtree($plugin_path);
-```
+- Colorized warning prompt with confirmation required (type "yes")
+- Gets actual plugin path from plugin object (not hardcoded)
+- Checks if plugin is enabled before deletion (prevents accidental deletion)
+- Disables version in database via VersionDAO
+- Deletes plugin settings from plugin_settings table
+- Removes plugin files using FileManager::rmtree()
+- --force flag skips confirmation and enabled check
 
 **Validation**:
 - ✅ Delete plugin and verify files removed
@@ -1157,37 +1109,12 @@ $fileManager->rmtree($plugin_path);
 - ✅ Integration with PluginHelper::upgradePlugin()
 
 **Implementation**:
-```php
-// ✅ Implemented with enhancements
-
-// From file:
-$versionInfo = $this->get_version_from_archive($file_path, basename($file_path));
-$new_version = $versionInfo['version'];
-
-if (!$force) {
-    if (version_compare($new_version, $current_version_string, '<=')) {
-        OJS_CLI::error("Upgrade cancelled: New version not newer. Use --force");
-    }
-}
-
-DB::beginTransaction();
-try {
-    $version = $pluginHelper->upgradePlugin($category, $plugin_name, $file_path, basename($file_path));
-    DB::commit();
-    OJS_CLI::success("Plugin upgraded: {$plugin_name} (version {$version->getVersionString()})");
-} catch (Exception $e) {
-    if (DB::transactionLevel() > 0) {
-        DB::rollback();
-    }
-    OJS_CLI::error("Upgrade failed: " . $e->getMessage());
-}
-
-// From gallery:
-$pluginGalleryDao = DAORegistry::getDAO('PluginGalleryDAO');
-$db_plugin_name = preg_replace('/(plugin|Plugin)$/i', '', $plugin_name); // Normalize
-$plugins = $pluginGalleryDao->getNewestCompatible($application, $category, $db_plugin_name);
-// ... download and upgrade
-```
+- **From file**: Extracts version from archive, compares with current version
+- **From gallery**: Uses PluginGalleryDAO for compatibility checking
+- Version comparison prevents downgrades (unless --force)
+- Transaction handling with rollback on failure
+- Uses PluginHelper::upgradePlugin() for core upgrade logic
+- Plugin names use directory names (no suffix normalization needed)
 
 **Validation**:
 - ✅ Upgrade plugin from file and verify new version
@@ -1196,45 +1123,83 @@ $plugins = $pluginGalleryDao->getNewestCompatible($application, $category, $db_p
 - ✅ Test --force flag to skip version check
 - ✅ Verify transaction rollback on failure
 
-### ⚠️ Phase 9: Configuration & Polish - PARTIALLY COMPLETED
+### ✅ Phase 9: Configuration & Polish - COMPLETED
 
-**Status**: Basic functionality implemented, advanced features pending
+**Status**: Core functionality implemented
 
 **Deliverables**:
-- ⚠️ Configuration file support (basic structure exists, not fully tested)
+- ⚠️ Configuration file support (basic structure exists, not fully tested - skipped for now)
 - ✅ Color output (OJS_CLI::colorize implemented and used)
-- ⏳ Progress indicators (not implemented)
 - ✅ Improved error messages (implemented with OJS_CLI::error, success, warning)
-- ⏳ Documentation (README exists, needs update)
+- ✅ Documentation (README and CLAUDE.md updated)
+- ✅ **EXTRA**: Plugin naming refactoring - switched from class names to directory names
 
 **Key Files**:
-- ⚠️ `php/OJS_CLI/Configurator.php` (exists, needs testing)
-- ⏳ `php/config-spec.php` (may not exist)
-- ⏳ `docs/*.md` (architecture.md and roadmap.md exist, may need updates)
+- ⚠️ `php/OJS_CLI/Configurator.php` (exists, testing deferred)
+- ✅ `README.md` (updated with current features)
+- ✅ `PLUGIN_NAMING_PLAN.md` (comprehensive refactoring plan)
+- ✅ `CLAUDE.md` (project-specific instructions)
 
 **Validation**:
-- ⏳ Config file loaded correctly (needs testing)
-- ✅ Color output works (verified in delete command)
-- ⏳ All commands documented (needs verification)
+- ✅ Color output works (verified across all commands)
+- ✅ Error messages are clear and helpful
+- ✅ All commands use directory names consistently
 
-### ⏳ Phase 10: Testing & Packaging - NOT STARTED
+### ⏳ Phase 10: Testing & Packaging - IN PROGRESS
 
-**Status**: Not implemented
+**Status**: Testing implementation in progress
 
 **Deliverables**:
-- ⏳ Unit tests for core components
-- ⏳ Integration tests for plugin commands
-- ⏳ Installation instructions
-- ⏳ Package for distribution
+- ⏳ Manual testing script for plugin commands
+- ⏳ Test validation checklist
+- ⏳ Installation instructions (deferred)
+- ⏳ Package for distribution (deferred)
+
+**Testing Areas**:
+1. **Plugin List Command**
+   - List all plugins with various formats (table, JSON, CSV, YAML)
+   - Filter by category, status, context
+   - Verify update checking works
+   - Verify enabled_in column shows correct contexts
+
+2. **Plugin Info Command**
+   - Display info for various plugins
+   - Verify directory names work
+   - Verify class names do NOT work (breaking change)
+
+3. **Plugin Activate/Deactivate**
+   - Activate with directory name
+   - Activate with --all-contexts
+   - Deactivate and verify status
+   - Verify mandatory plugins cannot be deactivated
+   - Verify class names do NOT work (breaking change)
+
+4. **Plugin Install**
+   - Install from local tar.gz file
+   - Install from gallery by name
+   - Install with --activate flag
+   - Verify MD5 checksum validation
+   - Verify transaction rollback on failure
+
+5. **Plugin Delete**
+   - Delete plugin with confirmation
+   - Delete with --force flag
+   - Verify cannot delete enabled plugins
+   - Verify files and database records removed
+
+6. **Plugin Upgrade**
+   - Upgrade from local file
+   - Upgrade from gallery
+   - Upgrade with --force flag
+   - Verify version comparison works
 
 **Key Files**:
-- ⏳ `tests/*.php` (not created)
-- ✅ `README.md` (exists, needs update)
-- ⏳ `INSTALL.md` (not created)
+- ⏳ `tests/manual_test.sh` (to be created)
+- ⏳ `tests/TEST_PLAN.md` (to be created)
 
 **Validation**:
-- ⏳ All tests pass
-- ⏳ Installation works on fresh system
+- ⏳ All test scenarios pass
+- ⏳ Breaking changes documented (directory names only)
 
 ---
 

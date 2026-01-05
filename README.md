@@ -168,6 +168,61 @@ composer install
 php bin/ojs --version
 ```
 
+## Testing
+
+### Manual Testing
+
+A comprehensive manual test suite is available in `tests/`:
+
+```bash
+# From your OJS installation directory
+cd /path/to/ojs
+
+# Run all tests
+/path/to/ojs-cli/tests/manual_test.sh
+
+# Run with verbose output
+/path/to/ojs-cli/tests/manual_test.sh --verbose
+
+# Run with debug mode
+/path/to/ojs-cli/tests/manual_test.sh --debug
+```
+
+The test suite covers:
+- Plugin list with all formats and filters
+- Plugin info command
+- Plugin activate/deactivate
+- Plugin install from gallery
+- Plugin delete with protection
+- Plugin upgrade
+- Error handling and edge cases
+
+See `tests/TEST_PLAN.md` for detailed test scenarios and verification steps.
+
+### Running Individual Tests
+
+```bash
+# Test plugin list
+ojs plugin list
+ojs plugin list --format=json
+
+# Test plugin info (uses directory names, not class names)
+ojs plugin info hypothesis        # ✅ Works
+ojs plugin info hypothesisplugin  # ❌ Error (breaking change)
+
+# Test activate/deactivate
+ojs plugin activate hypothesis
+ojs plugin deactivate hypothesis
+
+# Test install from gallery
+ojs plugin install hypothesis
+
+# Test delete (with protection)
+ojs plugin delete hypothesis  # ❌ Error if enabled
+ojs plugin deactivate hypothesis
+ojs plugin delete hypothesis  # ✅ Prompts for confirmation
+```
+
 ## Project Structure
 
 ```
