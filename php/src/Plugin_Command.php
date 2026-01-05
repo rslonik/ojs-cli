@@ -525,23 +525,21 @@ class Plugin_Command
      * @return array|null Plugin info or null if not found
      */
     /**
-     * Find a plugin by name (directory name or class name)
+     * Find a plugin by directory name
      *
-     * @param string $plugin_name Plugin name (directory name preferred, class name for backward compat)
+     * @param string $plugin_name Plugin directory name (e.g., "shariff", "hypothesis")
      * @param string|null $category Plugin category to search in (null = all categories)
      * @return array|null Array with 'name', 'category', 'plugin' or null if not found
      *
      * Search order:
      * 1. Exact match on directory name (e.g., "shariff")
-     * 2. Exact match on class name (e.g., "shariffplugin") - backward compatibility
-     * 3. Case-insensitive match on directory name
-     * 4. Case-insensitive match on class name
+     * 2. Case-insensitive match on directory name (e.g., "Shariff" → "shariff")
      */
     private function find_plugin($plugin_name, $category = null)
     {
         $categories = $category ? [$category] : \PKP\plugins\PluginRegistry::getCategories();
 
-        // Strategy 1: Try exact match on directory name (preferred method)
+        // Strategy 1: Try exact match on directory name
         foreach ($categories as $cat) {
             $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
             foreach ($plugins as $plugin) {
@@ -556,22 +554,7 @@ class Plugin_Command
             }
         }
 
-        // Strategy 2: Try exact match on class name (backward compatibility)
-        foreach ($categories as $cat) {
-            $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
-            foreach ($plugins as $plugin) {
-                $class_name = $plugin->getName();
-                if ($class_name === $plugin_name) {
-                    return [
-                        'name' => $plugin->getDirName(),  // Return directory name
-                        'category' => $cat,
-                        'plugin' => $plugin
-                    ];
-                }
-            }
-        }
-
-        // Strategy 3: Try case-insensitive match on directory name
+        // Strategy 2: Try case-insensitive match on directory name
         foreach ($categories as $cat) {
             $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
             foreach ($plugins as $plugin) {
@@ -579,21 +562,6 @@ class Plugin_Command
                 if (strcasecmp($dir_name, $plugin_name) === 0) {
                     return [
                         'name' => $dir_name,
-                        'category' => $cat,
-                        'plugin' => $plugin
-                    ];
-                }
-            }
-        }
-
-        // Strategy 4: Try case-insensitive match on class name (backward compatibility)
-        foreach ($categories as $cat) {
-            $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
-            foreach ($plugins as $plugin) {
-                $class_name = $plugin->getName();
-                if (strcasecmp($class_name, $plugin_name) === 0) {
-                    return [
-                        'name' => $plugin->getDirName(),  // Return directory name
                         'category' => $cat,
                         'plugin' => $plugin
                     ];
