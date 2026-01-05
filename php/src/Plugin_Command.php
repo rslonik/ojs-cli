@@ -300,36 +300,21 @@ class Plugin_Command
         $context_path = $assoc_args['context'] ?? null;
         $context_id = $this->resolve_context($context_path);
 
-        // Find the plugin
-        $plugin = null;
-        $found_category = null;
+        // Use find_plugin helper with 4-strategy search (directory name preferred)
+        $plugin_info = $this->find_plugin($plugin_name, $category);
 
-        // If category specified, only search that category
-        if ($category) {
-            $categories = [$category];
-        } else {
-            // Search all categories
-            $categories = \PKP\plugins\PluginRegistry::getCategories();
-        }
-
-        foreach ($categories as $cat) {
-            $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
-            foreach ($plugins as $p) {
-                if ($p->getName() === $plugin_name) {
-                    $plugin = $p;
-                    $found_category = $cat;
-                    break 2;
-                }
-            }
-        }
-
-        if (!$plugin) {
+        if (!$plugin_info) {
             if ($category) {
                 OJS_CLI::error("Plugin not found: {$category}/{$plugin_name}");
             } else {
                 OJS_CLI::error("Plugin not found: {$plugin_name}");
             }
         }
+
+        $plugin = $plugin_info['plugin'];
+        $found_category = $plugin_info['category'];
+        $dir_name = $plugin->getDirName();  // External identifier (display to user)
+        $class_name = $plugin->getName();   // Internal identifier (for PluginSettingsDAO)
 
         // Get plugin information
         $enabled = $plugin->getEnabled($context_id);
@@ -339,7 +324,7 @@ class Plugin_Command
         // Display information
         OJS_CLI::line('');
         OJS_CLI::line('Plugin Information:');
-        OJS_CLI::line('  Name:         ' . $plugin_name);
+        OJS_CLI::line('  Name:         ' . $dir_name);  // Show directory name
         OJS_CLI::line('  Display Name: ' . $plugin->getDisplayName());
         OJS_CLI::line('  Category:     ' . $found_category);
         OJS_CLI::line('  Version:      ' . $version);
@@ -348,9 +333,9 @@ class Plugin_Command
         OJS_CLI::line('  Description:  ' . $plugin->getDescription());
         OJS_CLI::line('');
 
-        // Show settings if available
+        // Show settings if available (PluginSettingsDAO requires class name)
         $pluginSettingsDao = \PKP\db\DAORegistry::getDAO('PluginSettingsDAO');
-        $settings = $pluginSettingsDao->getPluginSettings($context_id, $plugin_name);
+        $settings = $pluginSettingsDao->getPluginSettings($context_id, $class_name);
         if (!empty($settings)) {
             OJS_CLI::line('Settings:');
             foreach ($settings as $key => $value) {
