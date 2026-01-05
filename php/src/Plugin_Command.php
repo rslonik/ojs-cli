@@ -186,9 +186,11 @@ class Plugin_Command
             $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
 
             foreach ($plugins as $plugin) {
-                $plugin_name = $plugin->getName();
+                // Use directory name as the external identifier (user-facing)
+                $plugin_name = $plugin->getDirName();
 
                 // Check where this plugin is enabled
+                // Note: get_plugin_enabled_contexts uses getName() internally for PluginSettingsDAO
                 $enabled_in = $this->get_plugin_enabled_contexts($plugin, $journal_contexts);
 
                 // Determine if plugin matches status filter
@@ -209,7 +211,7 @@ class Plugin_Command
                 $update_info = $this->check_plugin_update($plugin, $current_version);
 
                 $all_plugins[] = [
-                    'name' => $plugin_name,
+                    'name' => $plugin_name,  // Directory name (e.g., "shariff")
                     'display_name' => $plugin->getDisplayName(),
                     'category' => $cat,
                     'version' => $current_version,
@@ -416,12 +418,7 @@ class Plugin_Command
         }
 
         $found_category = $plugin_info['category'];
-
-        // Load plugin object
-        $plugin = $this->load_plugin_object($found_category, $plugin_name);
-        if (!$plugin) {
-            OJS_CLI::error("Failed to load plugin: {$plugin_name}");
-        }
+        $plugin = $plugin_info['plugin'];  // Plugin object already loaded by find_plugin
 
         // Resolve the actual context to use
         $context_id = $this->resolve_plugin_context($plugin, $requested_context);
@@ -500,12 +497,7 @@ class Plugin_Command
         }
 
         $found_category = $plugin_info['category'];
-
-        // Load plugin object
-        $plugin = $this->load_plugin_object($found_category, $plugin_name);
-        if (!$plugin) {
-            OJS_CLI::error("Failed to load plugin: {$plugin_name}");
-        }
+        $plugin = $plugin_info['plugin'];  // Plugin object already loaded by find_plugin
 
         // Check if plugin can be disabled
         if (!$plugin->getCanDisable()) {
@@ -547,17 +539,31 @@ class Plugin_Command
      * @param string|null $category Optional category to search
      * @return array|null Plugin info or null if not found
      */
+    /**
+     * Find a plugin by name (directory name or class name)
+     *
+     * @param string $plugin_name Plugin name (directory name preferred, class name for backward compat)
+     * @param string|null $category Plugin category to search in (null = all categories)
+     * @return array|null Array with 'name', 'category', 'plugin' or null if not found
+     *
+     * Search order:
+     * 1. Exact match on directory name (e.g., "shariff")
+     * 2. Exact match on class name (e.g., "shariffplugin") - backward compatibility
+     * 3. Case-insensitive match on directory name
+     * 4. Case-insensitive match on class name
+     */
     private function find_plugin($plugin_name, $category = null)
     {
         $categories = $category ? [$category] : \PKP\plugins\PluginRegistry::getCategories();
 
-        // Try to find plugin with exact name match first
+        // Strategy 1: Try exact match on directory name (preferred method)
         foreach ($categories as $cat) {
             $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
             foreach ($plugins as $plugin) {
-                if ($plugin->getName() === $plugin_name) {
+                $dir_name = $plugin->getDirName();
+                if ($dir_name === $plugin_name) {
                     return [
-                        'name' => $plugin_name,
+                        'name' => $dir_name,
                         'category' => $cat,
                         'plugin' => $plugin
                     ];
@@ -565,36 +571,47 @@ class Plugin_Command
             }
         }
 
-        // If not found, try with "plugin" suffix (e.g., "shariff" -> "shariffplugin")
-        if (!preg_match('/(plugin|Plugin)$/i', $plugin_name)) {
-            $plugin_name_with_suffix = $plugin_name . 'plugin';
-            foreach ($categories as $cat) {
-                $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
-                foreach ($plugins as $plugin) {
-                    if ($plugin->getName() === $plugin_name_with_suffix) {
-                        return [
-                            'name' => $plugin_name_with_suffix,
-                            'category' => $cat,
-                            'plugin' => $plugin
-                        ];
-                    }
+        // Strategy 2: Try exact match on class name (backward compatibility)
+        foreach ($categories as $cat) {
+            $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
+            foreach ($plugins as $plugin) {
+                $class_name = $plugin->getName();
+                if ($class_name === $plugin_name) {
+                    return [
+                        'name' => $plugin->getDirName(),  // Return directory name
+                        'category' => $cat,
+                        'plugin' => $plugin
+                    ];
                 }
             }
         }
 
-        // If not found, try without "plugin" suffix (e.g., "shariffplugin" -> "shariff")
-        if (preg_match('/(plugin|Plugin)$/i', $plugin_name)) {
-            $plugin_name_without_suffix = preg_replace('/(plugin|Plugin)$/i', '', $plugin_name);
-            foreach ($categories as $cat) {
-                $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
-                foreach ($plugins as $plugin) {
-                    if ($plugin->getName() === $plugin_name_without_suffix) {
-                        return [
-                            'name' => $plugin_name_without_suffix,
-                            'category' => $cat,
-                            'plugin' => $plugin
-                        ];
-                    }
+        // Strategy 3: Try case-insensitive match on directory name
+        foreach ($categories as $cat) {
+            $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
+            foreach ($plugins as $plugin) {
+                $dir_name = $plugin->getDirName();
+                if (strcasecmp($dir_name, $plugin_name) === 0) {
+                    return [
+                        'name' => $dir_name,
+                        'category' => $cat,
+                        'plugin' => $plugin
+                    ];
+                }
+            }
+        }
+
+        // Strategy 4: Try case-insensitive match on class name (backward compatibility)
+        foreach ($categories as $cat) {
+            $plugins = \PKP\plugins\PluginRegistry::loadCategory($cat, false);
+            foreach ($plugins as $plugin) {
+                $class_name = $plugin->getName();
+                if (strcasecmp($class_name, $plugin_name) === 0) {
+                    return [
+                        'name' => $plugin->getDirName(),  // Return directory name
+                        'category' => $cat,
+                        'plugin' => $plugin
+                    ];
                 }
             }
         }
@@ -909,16 +926,14 @@ class Plugin_Command
         // Get plugin gallery DAO
         $pluginGalleryDao = \PKP\db\DAORegistry::getDAO('PluginGalleryDAO');
 
-        // Normalize plugin name (remove "plugin" suffix if present)
-        $search_name = preg_replace('/(plugin|Plugin)$/i', '', $plugin_name);
-
-        // Search for compatible plugins
-        $plugins = $pluginGalleryDao->getNewestCompatible($application, null, $search_name);
+        // Search for compatible plugins using directory name
+        // Gallery uses directory names (e.g., "shariff", not "shariffplugin")
+        $plugins = $pluginGalleryDao->getNewestCompatible($application, null, $plugin_name);
 
         // Find the requested plugin
         $galleryPlugin = null;
         foreach ($plugins as $plugin) {
-            if ($plugin->getProduct() === $search_name) {
+            if ($plugin->getProduct() === $plugin_name) {
                 $galleryPlugin = $plugin;
                 break;
             }
@@ -927,8 +942,7 @@ class Plugin_Command
         if (!$galleryPlugin) {
             OJS_CLI::error(
                 "Plugin '{$plugin_name}' not found in gallery or not compatible with this OJS version.\n" .
-                "Search term used: {$search_name}\n" .
-                "Try 'ojs plugin list' to see installed plugins or check https://pkp.sfu.ca/plugin-gallery/"
+                "Try 'ojs plugin list' to see installed plugins or check https://pkp.github.io/plugin-compatibility/index.html"
             );
         }
 
@@ -1223,13 +1237,13 @@ class Plugin_Command
         $found_category = $plugin_info['category'];
         $plugin_obj = $plugin_info['plugin'];
 
-        // Normalize plugin name for database lookup (remove "plugin" suffix)
-        // Gallery and database use "shariff" but getName() returns "shariffplugin"
-        $db_plugin_name = preg_replace('/(plugin|Plugin)$/i', '', $plugin_name);
+        // Get directory name (find_plugin now returns this)
+        $dir_name = $plugin_info['name'];
 
-        // Get current version using normalized name
+        // Get current version using directory name
+        // VersionDAO stores directory names (e.g., "shariff")
         $versionDao = \PKP\db\DAORegistry::getDAO('VersionDAO');
-        $current_version = $versionDao->getCurrentVersion("plugins.{$found_category}", $db_plugin_name);
+        $current_version = $versionDao->getCurrentVersion("plugins.{$found_category}", $dir_name);
 
         if (!$current_version) {
             OJS_CLI::error("Plugin not installed: {$plugin_name}. Use 'ojs plugin install' instead.");
@@ -1244,12 +1258,13 @@ class Plugin_Command
             $pluginGalleryDao = \PKP\db\DAORegistry::getDAO('PluginGalleryDAO');
             $application = \APP\core\Application::get();
 
-            // Search for specific plugin using normalized name
-            $plugins = $pluginGalleryDao->getNewestCompatible($application, $found_category, $db_plugin_name);
+            // Search for specific plugin using directory name
+            // Gallery uses directory names (e.g., "shariff")
+            $plugins = $pluginGalleryDao->getNewestCompatible($application, $found_category, $dir_name);
 
             $galleryPlugin = null;
             foreach ($plugins as $gp) {
-                if ($gp->getProduct() === $db_plugin_name) {
+                if ($gp->getProduct() === $dir_name) {
                     $galleryPlugin = $gp;
                     break;
                 }
@@ -1477,21 +1492,17 @@ class Plugin_Command
             $pluginGalleryDao = \PKP\db\DAORegistry::getDAO('PluginGalleryDAO');
             $application = \APP\core\Application::get();
 
-            $plugin_name = $plugin->getName();
+            // Use directory name for gallery search
+            // Gallery uses directory names (e.g., "shariff")
+            $dir_name = $plugin->getDirName();
 
-            // Normalize plugin name for gallery search
-            // Gallery uses directory name (e.g., "shariff") but getName() returns "shariffplugin"
-            $search_name = $plugin_name;
-            // Remove common suffixes: "plugin", "Plugin"
-            $search_name = preg_replace('/(plugin|Plugin)$/i', '', $search_name);
-
-            // Search for specific plugin using normalized name
-            $plugins = $pluginGalleryDao->getNewestCompatible($application, null, $search_name);
+            // Search for specific plugin using directory name
+            $plugins = $pluginGalleryDao->getNewestCompatible($application, null, $dir_name);
 
             // Find matching plugin
             foreach ($plugins as $galleryPlugin) {
-                // Match against normalized search name
-                if ($galleryPlugin->getProduct() === $search_name) {
+                // Match against directory name
+                if ($galleryPlugin->getProduct() === $dir_name) {
                     $available_version = $galleryPlugin->getVersion();
 
                     // Compare versions

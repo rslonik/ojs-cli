@@ -1,0 +1,5 @@
+- You do not need to version the files in this project with datetime asked in the global CLAUDE.md.
+- Follow OJS/PKP coding standards (PSR-2, OJS conventions).
+- IMPLEMENTATION_PLAN.md has all the other details needed.
+- Remember to commit changes to git
+- I fixed the delete command by looking lib/pkp/classes/controllers/grid/plugins/PluginGridHandler.php; you always need to understand the OJS pkp-lib implementation so implement the commands in this ojs-cli.
