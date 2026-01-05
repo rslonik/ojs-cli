@@ -897,7 +897,7 @@ class Plugin_Command
      * : Plugin category (if known, for faster lookup)
      *
      * [--force]
-     * : Skip confirmation prompt
+     * : Skip confirmation prompt and allow deletion of enabled plugins
      *
      * ## EXAMPLES
      *
@@ -906,6 +906,15 @@ class Plugin_Command
      *
      *   # Delete without confirmation
      *   $ ojs plugin delete customBlockManager --force
+     *
+     * ## NOTES
+     *
+     * Plugins must be deactivated before deletion. If the plugin is enabled
+     * in any context (site-wide or journal-specific), deletion will be blocked
+     * unless --force is used. It's recommended to deactivate first:
+     *
+     *   $ ojs plugin deactivate customBlockManager
+     *   $ ojs plugin delete customBlockManager
      */
     public function delete($args, $assoc_args)
     {
@@ -924,6 +933,27 @@ class Plugin_Command
         }
 
         $found_category = $plugin['category'];
+        $plugin_obj = $plugin['plugin'];
+
+        // Check if plugin is enabled anywhere
+        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
+        $journals = $journal_dao->getAll(true);
+        $journal_contexts = [];
+        while ($journal = $journals->next()) {
+            $journal_contexts[$journal->getId()] = $journal->getPath();
+        }
+
+        $enabled_in = $this->get_plugin_enabled_contexts($plugin_obj, $journal_contexts);
+
+        if (!empty($enabled_in) && !$force) {
+            OJS_CLI::error(
+                "Cannot delete plugin '{$plugin_name}': Plugin is currently enabled.\n" .
+                "Enabled in: {$enabled_in}\n" .
+                "Please deactivate the plugin first using:\n" .
+                "  ojs plugin deactivate {$plugin_name}\n" .
+                "Or use --force to delete anyway (not recommended)."
+            );
+        }
 
         // Confirm with user unless --force
         if (!$force) {
@@ -937,8 +967,7 @@ class Plugin_Command
             }
         }
 
-        // Load plugin object to get actual path
-        $plugin_obj = $plugin['plugin'];
+        // Get actual path from plugin object
         $plugin_path = $plugin_obj->getPluginPath();
 
         // Get version info
@@ -947,7 +976,6 @@ class Plugin_Command
 
 
         // Delete version record from database
-        OJS_CLI::log("before");
         if ($version) {
             $versionDao->disableVersion("plugins.{$found_category}", basename($plugin_path));
             OJS_CLI::log("Disabled plugin version in database");
