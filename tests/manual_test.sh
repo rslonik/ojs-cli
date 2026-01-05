@@ -64,17 +64,17 @@ print_test() {
 
 print_pass() {
     echo -e "${GREEN}✅ PASS${NC}: $1"
-    ((TESTS_PASSED++))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
 }
 
 print_fail() {
     echo -e "${RED}❌ FAIL${NC}: $1"
-    ((TESTS_FAILED++))
+    TESTS_FAILED=$((TESTS_FAILED + 1))
 }
 
 print_skip() {
     echo -e "${YELLOW}⏭  SKIP${NC}: $1"
-    ((TESTS_SKIPPED++))
+    TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
 }
 
 run_test() {
@@ -82,7 +82,7 @@ run_test() {
     local test_command="$2"
     local expected_result="${3:-0}"  # 0 = should succeed, 1 = should fail
 
-    ((TESTS_TOTAL++))
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
     print_test "$test_name"
 
     if [[ $VERBOSE -eq 1 ]]; then
@@ -132,7 +132,7 @@ run_test_contains() {
     local test_command="$2"
     local expected_string="$3"
 
-    ((TESTS_TOTAL++))
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
     print_test "$test_name"
 
     if [[ $VERBOSE -eq 1 ]]; then
@@ -235,8 +235,8 @@ test_suite_3_plugin_activate_deactivate() {
     print_test "3.1 Deactivate plugin (cleanup)"
     $OJS_CLI_BIN plugin deactivate hypothesis 2>/dev/null || true
     print_pass "3.1 Cleanup done"
-    ((TESTS_TOTAL++))
-    ((TESTS_PASSED++))
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
 
     # Test 3.2: Activate with directory name
     run_test "3.2 Activate with directory name" \
@@ -276,10 +276,10 @@ test_suite_4_plugin_install() {
     # Skip if we don't want to modify the OJS installation
 
     print_skip "4.1 Install from local file (requires manual setup)"
-    ((TESTS_TOTAL++))
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
 
     print_skip "4.2 Install from gallery (requires deletion first)"
-    ((TESTS_TOTAL++))
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
 
     # Test 4.3: Install non-existent plugin from gallery
     run_test "4.3 Install non-existent plugin from gallery" \
@@ -294,8 +294,8 @@ test_suite_5_plugin_delete() {
     print_test "5.1 Ensure plugin is enabled"
     $OJS_CLI_BIN plugin activate hypothesis 2>/dev/null || true
     print_pass "5.1 Plugin enabled"
-    ((TESTS_TOTAL++))
-    ((TESTS_PASSED++))
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
 
     run_test "5.2 Delete enabled plugin (should fail)" \
         "$OJS_CLI_BIN plugin delete hypothesis --force" \
@@ -310,18 +310,18 @@ test_suite_5_plugin_delete() {
     print_test "5.4 Cleanup: deactivate plugin"
     $OJS_CLI_BIN plugin deactivate hypothesis 2>/dev/null || true
     print_pass "5.4 Cleanup done"
-    ((TESTS_TOTAL++))
-    ((TESTS_PASSED++))
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
 }
 
 test_suite_6_plugin_upgrade() {
     print_section "Test Suite 6: Plugin Upgrade"
 
     print_skip "6.1 Upgrade from local file (requires manual setup)"
-    ((TESTS_TOTAL++))
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
 
     print_skip "6.2 Upgrade from gallery (may modify installation)"
-    ((TESTS_TOTAL++))
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
 
     # Test 6.3: Upgrade non-existent plugin
     run_test "6.3 Upgrade non-existent plugin" \
