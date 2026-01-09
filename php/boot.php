@@ -14,6 +14,13 @@ if (PHP_SAPI !== 'cli' && PHP_SAPI !== 'phpdbg') {
     exit(1);
 }
 
+// Check for --debug flag in arguments and set environment variable
+// This needs to happen before loading ojs-cli.php where OJS_CLI_DEBUG constant is defined
+global $argv;
+if (in_array('--debug', $argv ?? [])) {
+    putenv('OJS_CLI_DEBUG=1');
+}
+
 // Set error handling for CLI
 // Only show errors, not warnings/deprecations unless debug mode
 if (getenv('OJS_CLI_DEBUG')) {

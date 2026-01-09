@@ -1052,7 +1052,7 @@ class Plugin_Command
      *
      * ## OPTIONS
      *
-     * <plugin>
+     * [<plugin>]
      * : Plugin name to upgrade OR path to plugin archive file
      *
      * [--category=<category>]
@@ -1060,6 +1060,9 @@ class Plugin_Command
      *
      * [--force]
      * : Skip version check and force upgrade
+     *
+     * [--all]
+     * : Upgrade all plugins with available updates
      *
      * ## EXAMPLES
      *
@@ -1071,16 +1074,26 @@ class Plugin_Command
      *
      *   # Force upgrade even if version appears current
      *   $ ojs plugin upgrade shariffplugin --force
+     *
+     *   # Upgrade all plugins with available updates
+     *   $ ojs plugin upgrade --all
      */
     public function upgrade($args, $assoc_args)
     {
-        $plugin_source = $args[0] ?? null;
-        if (!$plugin_source) {
-            OJS_CLI::error('Plugin name or path required');
-        }
-
         $category = $assoc_args['category'] ?? null;
         $force = isset($assoc_args['force']);
+        $all = isset($assoc_args['all']);
+
+        // Handle bulk upgrade for all plugins with updates
+        if ($all) {
+            $this->upgrade_all_with_updates($category, $force);
+            return;
+        }
+
+        $plugin_source = $args[0] ?? null;
+        if (!$plugin_source) {
+            OJS_CLI::error('Plugin name or path required (or use --all to upgrade all plugins with updates)');
+        }
 
         // Check if it's a file path
         if (file_exists($plugin_source)) {
@@ -1088,6 +1101,89 @@ class Plugin_Command
         } else {
             $this->upgrade_from_gallery($plugin_source, $category, $force);
         }
+    }
+
+    /**
+     * Upgrade all plugins with available updates
+     *
+     * @param string|null $category Plugin category filter
+     * @param bool $force Force upgrade
+     */
+    private function upgrade_all_with_updates($category, $force)
+    {
+        OJS_CLI::line('');
+        OJS_CLI::log('Checking for plugin updates...');
+
+        // Get all plugins with their update status
+        $plugins = $this->get_plugins($category, null, 'all');
+
+        // Filter for plugins with available updates
+        $plugins_to_upgrade = array_filter($plugins, function($plugin) {
+            return $plugin['update'] === 'available';
+        });
+
+        if (empty($plugins_to_upgrade)) {
+            OJS_CLI::line('No plugin updates available.');
+            OJS_CLI::line('');
+            return;
+        }
+
+        OJS_CLI::line(sprintf('Found %d plugin(s) with available updates:', count($plugins_to_upgrade)));
+        foreach ($plugins_to_upgrade as $plugin) {
+            OJS_CLI::line(sprintf('  - %s (%s -> %s)', $plugin['name'], $plugin['version'], $plugin['update_version']));
+        }
+        OJS_CLI::line('');
+
+        // Upgrade each plugin
+        $results = [];
+        foreach ($plugins_to_upgrade as $plugin) {
+            $plugin_name = $plugin['name'];
+            $plugin_category = $plugin['category'];
+            $current_version = $plugin['version'];
+            $new_version = $plugin['update_version'];
+
+            OJS_CLI::log("Upgrading {$plugin_name} ({$current_version} -> {$new_version})...");
+
+            try {
+                // Upgrade from gallery (suppress output during bulk operation)
+                $this->upgrade_from_gallery($plugin_name, $plugin_category, true);
+
+                $results[] = [
+                    'name' => $plugin_name,
+                    'status' => 'success',
+                    'version' => $new_version
+                ];
+            } catch (\Exception $e) {
+                $results[] = [
+                    'name' => $plugin_name,
+                    'status' => 'error',
+                    'message' => $e->getMessage()
+                ];
+            }
+        }
+
+        // Display summary
+        OJS_CLI::line('');
+        OJS_CLI::line('Upgrade Summary:');
+        $success_count = 0;
+        $error_count = 0;
+
+        foreach ($results as $result) {
+            if ($result['status'] === 'success') {
+                $status_icon = OJS_CLI::colorize('✓', 'green');
+                $message = "upgraded to {$result['version']}";
+                $success_count++;
+            } else {
+                $status_icon = OJS_CLI::colorize('✗', 'red');
+                $message = "failed: {$result['message']}";
+                $error_count++;
+            }
+            OJS_CLI::line("  {$status_icon} {$result['name']} - {$message}");
+        }
+
+        OJS_CLI::line('');
+        OJS_CLI::line(sprintf('Total: %d upgraded, %d failed', $success_count, $error_count));
+        OJS_CLI::line('');
     }
 
     /**
@@ -1241,9 +1337,10 @@ class Plugin_Command
 
             // Download the plugin
             $download_url = $galleryPlugin->getReleasePackage();
+            $expected_md5 = $galleryPlugin->getReleaseMD5();
             OJS_CLI::log("Downloading from: {$download_url}");
 
-            $temp_file = $this->download_plugin($download_url, $db_plugin_name);
+            $temp_file = $this->download_plugin($download_url, $expected_md5);
 
             try {
                 // Upgrade using local file method
