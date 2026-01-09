@@ -2,18 +2,22 @@
 
 A standalone CLI tool for OJS (Open Journal Systems) modeled after WordPress's WP-CLI. This tool provides command-line management capabilities for OJS installations.
 
+A few words from the human: this is a work in progress. It supports only OJS 3.5 for now. It was coded with Claude with some human bug hunting/fixing where the IA lost it's mojo. Obviously it's not recommended to use it in production if you do not know how to recover from problems.
+
+To use this just clone and set up an alias to bin/ojs. Run it inside the installation folder or use `--path` global option to specify the installation path.
+
 ## Status
 
 ✅ **Functional** - Core plugin management commands working
 
 **Completed Features**:
-- ✅ Plugin list with filtering, update checking, and multiple output formats
-- ✅ Plugin info (detailed information)
-- ✅ Plugin activate/deactivate with context awareness
-- ✅ Plugin install from local file
-- ✅ Plugin install from gallery (with MD5 verification)
-- ✅ Plugin delete with confirmation (prevents deletion of enabled plugins)
-- ✅ Plugin upgrade (from file and gallery)
+- Plugin list with filtering, update checking, and multiple output formats
+- Plugin info (detailed information)
+- Plugin activate/deactivate with context awareness
+- Plugin install from local file
+- Plugin install from gallery (with MD5 verification)
+- Plugin delete with confirmation (prevents deletion of enabled plugins)
+- Plugin upgrade (from file and gallery)
 
 **Pending**:
 - ⏳ Configuration file support (needs testing)
@@ -24,7 +28,7 @@ A standalone CLI tool for OJS (Open Journal Systems) modeled after WordPress's W
 **Primary Goal**: Create `ojs` command with `ojs plugin` subcommands (list, activate, deactivate, delete, install, upgrade).
 
 **Key Features**:
-- Global Composer installation (`composer global require pkp/ojs-cli`)
+- [not yet] Global Composer installation (`composer global require pkp/ojs-cli`)
 - Auto-discovery of OJS installations
 - Context-aware operations (site-wide or journal-specific)
 - Multiple output formats (table, JSON, CSV, YAML)
@@ -149,7 +153,7 @@ ojs help
 
 ## Requirements
 
-- PHP 8.1 or higher
+- PHP 8.1 or higher (8.3 recommended)
 - Composer
 - PHP extensions: phar, curl, zip
 - Access to an OJS 3.5 installation
