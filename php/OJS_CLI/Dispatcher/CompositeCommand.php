@@ -21,6 +21,11 @@ class CompositeCommand
     private $callable;
 
     /**
+     * @var string|null Class name for deferred instantiation
+     */
+    private $class_name;
+
+    /**
      * @var array Subcommands
      */
     private $subcommands = [];
@@ -36,6 +41,16 @@ class CompositeCommand
     private $longdesc;
 
     /**
+     * @var bool Whether this command requires OJS to be loaded
+     */
+    private $requires_ojs;
+
+    /**
+     * @var bool Whether the class has been initialized
+     */
+    private $initialized = false;
+
+    /**
      * Constructor
      *
      * @param string $name Command name
@@ -47,17 +62,53 @@ class CompositeCommand
         $this->name = $name;
         $this->shortdesc = $options['shortdesc'] ?? '';
         $this->longdesc = $options['longdesc'] ?? '';
+        $this->requires_ojs = ($options['when'] ?? '') === 'after_ojs_load';
 
-        // If callable is a string class name, instantiate it
+        // Defer instantiation if command requires OJS
         if (is_string($callable) && class_exists($callable)) {
-            $this->callable = new $callable();
-            $this->scan_class_methods(get_class($this->callable));
+            if ($this->requires_ojs && !\OJS_CLI::is_ojs_loaded()) {
+                // Defer instantiation - store class name only
+                $this->class_name = $callable;
+                $this->callable = null;
+            } else {
+                $this->callable = new $callable();
+                $this->scan_class_methods(get_class($this->callable));
+                $this->initialized = true;
+            }
         } elseif (is_object($callable)) {
             $this->callable = $callable;
             $this->scan_class_methods(get_class($callable));
+            $this->initialized = true;
         } else {
             $this->callable = $callable;
         }
+    }
+
+    /**
+     * Ensure the command class is initialized
+     *
+     * @return bool True if initialized successfully, false if OJS required but not loaded
+     */
+    private function ensure_initialized()
+    {
+        if ($this->initialized) {
+            return true;
+        }
+
+        // Check if OJS is required but not loaded
+        if ($this->requires_ojs && !\OJS_CLI::is_ojs_loaded()) {
+            return false;
+        }
+
+        // Now we can instantiate the class
+        if ($this->class_name && class_exists($this->class_name)) {
+            $this->callable = new $this->class_name();
+            $this->scan_class_methods(get_class($this->callable));
+            $this->initialized = true;
+            return true;
+        }
+
+        return false;
     }
 
     /**
@@ -107,9 +158,19 @@ class CompositeCommand
      */
     public function find_subcommand($args)
     {
-        // No subcommand specified - show help
+        // No subcommand specified - show help (which handles OJS requirement gracefully)
         if (empty($args)) {
             return ['command' => $this, 'args' => []];
+        }
+
+        // Ensure class is initialized before looking for subcommands
+        if (!$this->ensure_initialized()) {
+            // OJS required but not loaded - show helpful error
+            \OJS_CLI::error(
+                "The '{$this->name}' command requires an OJS installation.\n\n" .
+                "Please run this command from within an OJS installation directory,\n" .
+                "or specify the path with: ojs --path=/path/to/ojs {$this->name} <subcommand>"
+            );
         }
 
         $subcommand_name = $args[0];
@@ -152,7 +213,18 @@ class CompositeCommand
      */
     public function get_subcommands()
     {
+        $this->ensure_initialized();
         return $this->subcommands;
+    }
+
+    /**
+     * Check if this command requires OJS
+     *
+     * @return bool True if OJS is required
+     */
+    public function requires_ojs()
+    {
+        return $this->requires_ojs;
     }
 
     /**
@@ -167,6 +239,16 @@ class CompositeCommand
             \OJS_CLI::line($this->shortdesc);
             \OJS_CLI::line('');
         }
+
+        // Check if OJS is required but not loaded
+        if ($this->requires_ojs && !$this->initialized && !\OJS_CLI::is_ojs_loaded()) {
+            \OJS_CLI::line(\OJS_CLI::colorize('Note:', 'yellow') . ' This command requires an OJS installation.');
+            \OJS_CLI::line('Run from an OJS directory or use: ojs --path=/path/to/ojs ' . $this->name . ' <subcommand>');
+            \OJS_CLI::line('');
+            return;
+        }
+
+        $this->ensure_initialized();
 
         \OJS_CLI::line('Available subcommands:');
 

@@ -54,6 +54,9 @@ class LoadOJSCore implements BootstrapStep
             $state->application = $application;
             $state->ojs_loaded = true;
 
+            // Set global OJS loaded flag for command checking
+            \OJS_CLI::set_ojs_loaded(true);
+
             if ($state->runner) {
                 $state->runner->set_application($application);
             }

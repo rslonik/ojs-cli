@@ -14,6 +14,12 @@ if (PHP_SAPI !== 'cli' && PHP_SAPI !== 'phpdbg') {
     exit(1);
 }
 
+// Check PHP version (require 8.2+)
+if (version_compare(PHP_VERSION, '8.2.0', '<')) {
+    fwrite(STDERR, "Error: PHP 8.2 or higher is required. Found: " . PHP_VERSION . "\n");
+    exit(1);
+}
+
 // Check for --debug flag in arguments and set environment variable
 // This needs to happen before loading ojs-cli.php where OJS_CLI_DEBUG constant is defined
 global $argv;

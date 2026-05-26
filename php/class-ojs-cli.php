@@ -32,6 +32,11 @@ class OJS_CLI
     private static $colorize = true;
 
     /**
+     * @var bool Whether OJS has been loaded
+     */
+    private static $ojs_loaded = false;
+
+    /**
      * Output a success message
      *
      * @param string $message Message to output
@@ -211,5 +216,25 @@ class OJS_CLI
     public static function usage()
     {
         self::get_root_command()->show_usage();
+    }
+
+    /**
+     * Set whether OJS has been loaded
+     *
+     * @param bool $loaded True if OJS is loaded
+     */
+    public static function set_ojs_loaded($loaded)
+    {
+        self::$ojs_loaded = (bool)$loaded;
+    }
+
+    /**
+     * Check whether OJS has been loaded
+     *
+     * @return bool True if OJS is loaded
+     */
+    public static function is_ojs_loaded()
+    {
+        return self::$ojs_loaded;
     }
 }
