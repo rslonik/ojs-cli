@@ -1,0 +1,16 @@
+{
+    "main": "php/boot.php",
+    "output": "ojs.phar",
+    "chmod": "0755",
+    "directories": ["php"],
+    "files": ["composer.json", "composer.lock"],
+    "finder": [
+        {
+            "name": "*.php",
+            "in": "vendor",
+            "exclude": ["tests", "test", "doc", "docs", "examples", "Tests"]
+        }
+    ],
+    "compression": "GZ",
+    "git-version": "package_version"
+}

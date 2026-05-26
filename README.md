@@ -138,17 +138,26 @@ ojs plugin upgrade customBlockManager --force
 - [Architecture](docs/architecture.md) - System architecture overview
 - [Development Roadmap](docs/roadmap.md) - Implementation phases and timeline
 
-## Installation (Future)
+## Installation
+
+### Recommended: download the prebuilt binary
 
 ```bash
-# Global installation via Composer
-composer global require pkp/ojs-cli
-
-# Verify installation
+curl -fsSL https://github.com/rslonik/ojs-cli/releases/latest/download/ojs.phar \
+  -o /usr/local/bin/ojs
+chmod +x /usr/local/bin/ojs
 ojs --version
+```
 
-# Get help
-ojs help
+Requires PHP 8.1+ with the `phar`, `curl`, and `zip` extensions on the target system.
+
+### From source (development)
+
+```bash
+git clone https://github.com/rslonik/ojs-cli.git
+cd ojs-cli
+composer install
+php bin/ojs --version
 ```
 
 ## Requirements

@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: phar, curl, zip
+          ini-values: phar.readonly=0
+          tools: composer:v2, box
+
+      - name: Install production dependencies
+        run: composer install --no-dev --optimize-autoloader --prefer-dist
+
+      - name: Build PHAR
+        run: box compile
+
+      - name: Verify PHAR
+        run: php ojs.phar --version
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ojs.phar
+          tag_name: ${{ inputs.version }}
+          generate_release_notes: true
