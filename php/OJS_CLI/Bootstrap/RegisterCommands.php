@@ -67,20 +67,41 @@ class RegisterCommands implements BootstrapStep
     {
         // Load from php/src/ (command implementations)
         $src_dir = OJS_CLI_ROOT . '/php/src';
-        if (is_dir($src_dir)) {
-            $src_files = glob($src_dir . '/*.php');
-            foreach ($src_files as $file) {
-                require_once $file;
-            }
+        foreach ($this->get_php_files($src_dir) as $file) {
+            require_once $file;
         }
 
         // Load from php/commands/ (command registrations)
         $commands_dir = OJS_CLI_ROOT . '/php/commands';
-        if (is_dir($commands_dir)) {
-            $command_files = glob($commands_dir . '/*.php');
-            foreach ($command_files as $file) {
-                require_once $file;
+        foreach ($this->get_php_files($commands_dir) as $file) {
+            require_once $file;
+        }
+    }
+
+    /**
+     * Get PHP files from a directory (PHAR-compatible)
+     *
+     * glob() doesn't work inside PHAR archives, so we use scandir() instead
+     *
+     * @param string $dir Directory path
+     * @return array List of PHP file paths
+     */
+    private function get_php_files(string $dir): array
+    {
+        if (!is_dir($dir)) {
+            return [];
+        }
+
+        $files = [];
+        $entries = scandir($dir);
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+            if (substr($entry, -4) === '.php') {
+                $files[] = $dir . '/' . $entry;
             }
         }
+        return $files;
     }
 }
