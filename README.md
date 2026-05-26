@@ -149,7 +149,7 @@ chmod +x /usr/local/bin/ojs
 ojs --version
 ```
 
-Requires PHP 8.1+ with the `phar`, `curl`, and `zip` extensions on the target system.
+Requires PHP 8.2+ with the `phar`, `curl`, and `zip` extensions on the target system.
 
 ### From source (development)
 
@@ -162,7 +162,7 @@ php bin/ojs --version
 
 ## Requirements
 
-- PHP 8.1 or higher (8.3 recommended)
+- PHP 8.2 or higher (8.3 recommended)
 - Composer
 - PHP extensions: phar, curl, zip
 - Access to an OJS 3.5 installation
