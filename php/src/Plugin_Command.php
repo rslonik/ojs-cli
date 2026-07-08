@@ -8,6 +8,13 @@
 class Plugin_Command
 {
     /**
+     * Sentinel for "no --context given" (auto-detect per plugin).
+     * Needed because SITE_CONTEXT_ID is null in OJS 3.5, so null cannot
+     * distinguish an explicit --context=site-wide from no context at all.
+     */
+    private const CONTEXT_AUTO = 'auto';
+
+    /**
      * Lists all available plugins
      *
      * ## OPTIONS
@@ -75,7 +82,7 @@ class Plugin_Command
      * Resolve context from path
      *
      * @param string|null $context_path Context path, 'site-wide' for site-wide, or null for auto-detect
-     * @return int|null Context ID (null for site-wide)
+     * @return int|string|null Context ID (null for site-wide, CONTEXT_AUTO for auto-detect)
      */
     private function resolve_context($context_path)
     {
@@ -96,21 +103,21 @@ class Plugin_Command
             return $journal->getId();
         }
 
-        // Auto-detect: return null (will be resolved per-plugin)
-        return null;
+        // Auto-detect: resolved per-plugin later
+        return self::CONTEXT_AUTO;
     }
 
     /**
      * Resolve context for a specific plugin
      *
      * @param object $plugin Plugin object
-     * @param int|null $requested_context Requested context ID or null for auto
+     * @param int|string|null $requested_context Requested context ID or CONTEXT_AUTO
      * @return int|null Context ID
      */
     private function resolve_plugin_context($plugin, $requested_context)
     {
-        // If context explicitly requested, use it
-        if ($requested_context !== null) {
+        // If context explicitly requested (including site-wide null), use it
+        if ($requested_context !== self::CONTEXT_AUTO) {
             return $requested_context;
         }
 
@@ -299,6 +306,9 @@ class Plugin_Command
         $category = $assoc_args['category'] ?? null;
         $context_path = $assoc_args['context'] ?? null;
         $context_id = $this->resolve_context($context_path);
+        if ($context_id === self::CONTEXT_AUTO) {
+            $context_id = \PKP\core\PKPApplication::SITE_CONTEXT_ID;
+        }
 
         // Use find_plugin helper with 4-strategy search (directory name preferred)
         $plugin_info = $this->find_plugin($plugin_name, $category);
@@ -402,23 +412,12 @@ class Plugin_Command
             OJS_CLI::error("Plugin not found: {$plugin_name}");
         }
 
-        $found_category = $plugin_info['category'];
         $plugin = $plugin_info['plugin'];  // Plugin object already loaded by find_plugin
 
         // Resolve the actual context to use
         $context_id = $this->resolve_plugin_context($plugin, $requested_context);
 
-        // Enable plugin using plugin object
-        // Check if plugin supports context parameter (like BlockPlugin)
-        $reflection = new \ReflectionMethod($plugin, 'setEnabled');
-        $params = $reflection->getParameters();
-        if (count($params) > 1) {
-            // Plugin supports context parameter
-            $plugin->setEnabled(true, $context_id);
-        } else {
-            // Fall back to updateSetting directly
-            $plugin->updateSetting($context_id, 'enabled', true, 'bool');
-        }
+        $this->set_plugin_enabled($plugin, true, $context_id);
 
         // Display message
         if ($context_id === \PKP\core\PKPApplication::SITE_CONTEXT_ID) {
@@ -481,7 +480,6 @@ class Plugin_Command
             OJS_CLI::error("Plugin not found: {$plugin_name}");
         }
 
-        $found_category = $plugin_info['category'];
         $plugin = $plugin_info['plugin'];  // Plugin object already loaded by find_plugin
 
         // Check if plugin can be disabled
@@ -492,17 +490,7 @@ class Plugin_Command
         // Resolve the actual context to use
         $context_id = $this->resolve_plugin_context($plugin, $requested_context);
 
-        // Disable plugin using plugin object
-        // Check if plugin supports context parameter (like BlockPlugin)
-        $reflection = new \ReflectionMethod($plugin, 'setEnabled');
-        $params = $reflection->getParameters();
-        if (count($params) > 1) {
-            // Plugin supports context parameter
-            $plugin->setEnabled(false, $context_id);
-        } else {
-            // Fall back to updateSetting directly
-            $plugin->updateSetting($context_id, 'enabled', false, 'bool');
-        }
+        $this->set_plugin_enabled($plugin, false, $context_id);
 
         // Display message
         if ($context_id === \PKP\core\PKPApplication::SITE_CONTEXT_ID) {
@@ -513,6 +501,29 @@ class Plugin_Command
             $journal_path = $journal ? $journal->getPath() : "context {$context_id}";
             OJS_CLI::success("Plugin deactivated: {$plugin_name} (journal: {$journal_path})");
         }
+    }
+
+    /**
+     * Enable or disable a plugin in a given context
+     *
+     * Some plugin classes accept a context parameter in setEnabled (e.g.
+     * BlockPlugin); others take only the flag or lack setEnabled entirely,
+     * in which case the setting is written directly.
+     *
+     * @param object $plugin Plugin object
+     * @param bool $enabled New enabled state
+     * @param int|null $context_id Context ID (null for site-wide)
+     */
+    private function set_plugin_enabled($plugin, $enabled, $context_id)
+    {
+        if (method_exists($plugin, 'setEnabled')) {
+            $reflection = new \ReflectionMethod($plugin, 'setEnabled');
+            if (count($reflection->getParameters()) > 1) {
+                $plugin->setEnabled($enabled, $context_id);
+                return;
+            }
+        }
+        $plugin->updateSetting($context_id, 'enabled', $enabled, 'bool');
     }
 
     /**
@@ -576,18 +587,26 @@ class Plugin_Command
      * Load plugin object
      *
      * @param string $category Plugin category
-     * @param string $plugin_name Plugin name
+     * @param string $plugin_name Plugin directory name or class name
      * @return object|null Plugin object or null
      */
     private function load_plugin_object($category, $plugin_name)
     {
         $plugins = \PKP\plugins\PluginRegistry::loadCategory($category, false);
         foreach ($plugins as $plugin) {
-            if ($plugin->getName() === $plugin_name) {
+            if ($plugin->getDirName() === $plugin_name
+                || strcasecmp($plugin->getName(), $plugin_name) === 0) {
                 return $plugin;
             }
         }
-        return null;
+
+        // Not in the registry: loadCategory caches its result, so a plugin
+        // installed during this process is missing. Load it from disk directly.
+        try {
+            return \PKP\plugins\PluginRegistry::loadPlugin($category, $plugin_name);
+        } catch (\Exception $e) {
+            return null;
+        }
     }
 
 
@@ -604,7 +623,7 @@ class Plugin_Command
         if (!$plugin_info) {
             OJS_CLI::error("Plugin not found: {$plugin_name}");
         }
-        $found_category = $plugin_info['category'];
+        $plugin = $plugin_info['plugin'];
 
         $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
         $journals = $journal_dao->getAll(true); // enabled journals only
@@ -614,27 +633,11 @@ class Plugin_Command
             $context_id = $journal->getId();
 
             try {
-                $plugin = $this->load_plugin_object($found_category, $plugin_name);
-                if ($plugin) {
-                    // Use reflection to check if setEnabled accepts context parameter
-                    $reflection = new \ReflectionMethod($plugin, 'setEnabled');
-                    $params = $reflection->getParameters();
-                    if (count($params) > 1) {
-                        $plugin->setEnabled(true, $context_id);
-                    } else {
-                        $plugin->updateSetting($context_id, 'enabled', true, 'bool');
-                    }
-                    $results[] = [
-                        'journal' => $journal->getPath(),
-                        'status' => 'success'
-                    ];
-                } else {
-                    $results[] = [
-                        'journal' => $journal->getPath(),
-                        'status' => 'error',
-                        'message' => 'Failed to load plugin'
-                    ];
-                }
+                $this->set_plugin_enabled($plugin, true, $context_id);
+                $results[] = [
+                    'journal' => $journal->getPath(),
+                    'status' => 'success'
+                ];
             } catch (\Exception $e) {
                 $results[] = [
                     'journal' => $journal->getPath(),
@@ -668,7 +671,11 @@ class Plugin_Command
         if (!$plugin_info) {
             OJS_CLI::error("Plugin not found: {$plugin_name}");
         }
-        $found_category = $plugin_info['category'];
+        $plugin = $plugin_info['plugin'];
+
+        if (!$plugin->getCanDisable()) {
+            OJS_CLI::error("Plugin '{$plugin_name}' is mandatory and cannot be deactivated.");
+        }
 
         $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
         $journals = $journal_dao->getAll(true); // enabled journals only
@@ -678,35 +685,11 @@ class Plugin_Command
             $context_id = $journal->getId();
 
             try {
-                $plugin = $this->load_plugin_object($found_category, $plugin_name);
-                if ($plugin) {
-                    if (!$plugin->getCanDisable()) {
-                        $results[] = [
-                            'journal' => $journal->getPath(),
-                            'status' => 'error',
-                            'message' => 'Plugin is mandatory'
-                        ];
-                    } else {
-                        // Use reflection to check if setEnabled accepts context parameter
-                        $reflection = new \ReflectionMethod($plugin, 'setEnabled');
-                        $params = $reflection->getParameters();
-                        if (count($params) > 1) {
-                            $plugin->setEnabled(false, $context_id);
-                        } else {
-                            $plugin->updateSetting($context_id, 'enabled', false, 'bool');
-                        }
-                        $results[] = [
-                            'journal' => $journal->getPath(),
-                            'status' => 'success'
-                        ];
-                    }
-                } else {
-                    $results[] = [
-                        'journal' => $journal->getPath(),
-                        'status' => 'error',
-                        'message' => 'Failed to load plugin'
-                    ];
-                }
+                $this->set_plugin_enabled($plugin, false, $context_id);
+                $results[] = [
+                    'journal' => $journal->getPath(),
+                    'status' => 'success'
+                ];
             } catch (\Exception $e) {
                 $results[] = [
                     'journal' => $journal->getPath(),
@@ -817,7 +800,8 @@ class Plugin_Command
 
             // Get plugin info
             $product = $version->getProduct();
-            $category = $version->getProductType();
+            // getProductType returns e.g. "plugins.generic"; strip the prefix
+            $category = str_replace('plugins.', '', $version->getProductType());
             $version_string = $version->getVersionString();
 
             OJS_CLI::success("Plugin installed: {$product} (version {$version_string})");
@@ -830,14 +814,7 @@ class Plugin_Command
                     // Resolve context for activation
                     $activation_context = $this->resolve_plugin_context($plugin, $context_id);
 
-                    // Enable plugin
-                    $reflection = new \ReflectionMethod($plugin, 'setEnabled');
-                    $params = $reflection->getParameters();
-                    if (count($params) > 1) {
-                        $plugin->setEnabled(true, $activation_context);
-                    } else {
-                        $plugin->updateSetting($activation_context, 'enabled', true, 'bool');
-                    }
+                    $this->set_plugin_enabled($plugin, true, $activation_context);
 
                     if ($activation_context === \PKP\core\PKPApplication::SITE_CONTEXT_ID) {
                         OJS_CLI::success("Plugin activated (site-wide)");
@@ -1025,11 +1002,13 @@ class Plugin_Command
         }
 
         // Delete plugin settings from database
+        // plugin_settings stores the lowercased class name (see PluginSettingsDAO),
+        // not the directory name the user typed
         \Illuminate\Support\Facades\DB::table('plugin_settings')
-            ->where('plugin_name', $plugin_name)
+            ->where('plugin_name', strtolower($plugin_obj->getName()))
             ->delete();
         OJS_CLI::log("Deleted plugin settings from database");
-       
+
         // Delete plugin files using actual plugin path
         $fileManager = new \PKP\file\FileManager();
         $deleted_files = false;
@@ -1096,10 +1075,14 @@ class Plugin_Command
         }
 
         // Check if it's a file path
-        if (file_exists($plugin_source)) {
-            $this->upgrade_from_file($plugin_source, $category, $force);
-        } else {
-            $this->upgrade_from_gallery($plugin_source, $category, $force);
+        try {
+            if (file_exists($plugin_source)) {
+                $this->upgrade_from_file($plugin_source, $category, $force);
+            } else {
+                $this->upgrade_from_gallery($plugin_source, $category, $force);
+            }
+        } catch (\Exception $e) {
+            OJS_CLI::error($e->getMessage());
         }
     }
 
@@ -1192,79 +1175,81 @@ class Plugin_Command
      * @param string $file_path Path to plugin archive
      * @param string|null $category Plugin category
      * @param bool $force Force upgrade
+     * @throws \Exception on failure (callers decide whether to exit or continue)
      */
     private function upgrade_from_file($file_path, $category, $force)
     {
         if (!file_exists($file_path)) {
-            OJS_CLI::error("File not found: {$file_path}");
+            throw new \Exception("File not found: {$file_path}");
         }
 
         if (!is_readable($file_path)) {
-            OJS_CLI::error("File not readable: {$file_path}");
+            throw new \Exception("File not readable: {$file_path}");
         }
 
         // Parse the archive to get plugin info
         OJS_CLI::log("Reading plugin archive...");
 
+        $pluginHelper = new \PKP\plugins\PluginHelper();
+
         try {
-            $pluginHelper = new \PKP\plugins\PluginHelper();
             $versionInfo = $this->get_version_from_archive($file_path, basename($file_path));
-
-            $plugin_name = $versionInfo['product'];
-            $new_version = $versionInfo['version'];
-            $plugin_category = str_replace('plugins.', '', $versionInfo['productType']);
-
-            // Verify category if specified
-            if ($category && $category !== $plugin_category) {
-                OJS_CLI::error("Category mismatch: archive is '{$plugin_category}' but you specified '{$category}'");
-            }
-
-            // Find the plugin
-            $plugin_info = $this->find_plugin($plugin_name, $plugin_category);
-            if (!$plugin_info) {
-                OJS_CLI::error("Plugin not installed: {$plugin_name}. Use 'ojs plugin install' instead.");
-            }
-
-            // Get current version
-            $versionDao = \PKP\db\DAORegistry::getDAO('VersionDAO');
-            $current_version = $versionDao->getCurrentVersion("plugins.{$plugin_category}", $plugin_name);
-
-            if (!$current_version) {
-                OJS_CLI::error("Plugin not installed: {$plugin_name}. Use 'ojs plugin install' instead.");
-            }
-
-            $current_version_string = $current_version->getVersionString();
-
-            // Check version comparison unless forced
-            if (!$force) {
-                if (version_compare($new_version, $current_version_string, '<=')) {
-                    OJS_CLI::error(
-                        "Upgrade cancelled: New version ({$new_version}) is not newer than installed version ({$current_version_string}).\n" .
-                        "Use --force to upgrade anyway."
-                    );
-                }
-            }
-
-            OJS_CLI::log("Upgrading {$plugin_name} from {$current_version_string} to {$new_version}...");
-
-            // Perform upgrade using PluginHelper
-            // Note: upgradePlugin expects the database product name (without "plugin" suffix)
-            \Illuminate\Support\Facades\DB::beginTransaction();
-
-            try {
-                $version = $pluginHelper->upgradePlugin($plugin_category, $plugin_name, $file_path, basename($file_path));
-
-                \Illuminate\Support\Facades\DB::commit();
-
-                OJS_CLI::success("Plugin upgraded: {$plugin_name} (version {$version->getVersionString()})");
-            } catch (\Exception $e) {
-                if (\Illuminate\Support\Facades\DB::transactionLevel() > 0) {
-                    \Illuminate\Support\Facades\DB::rollback();
-                }
-                OJS_CLI::error("Upgrade failed: " . $e->getMessage());
-            }
         } catch (\Exception $e) {
-            OJS_CLI::error("Failed to read plugin archive: " . $e->getMessage());
+            throw new \Exception("Failed to read plugin archive: " . $e->getMessage());
+        }
+
+        $plugin_name = $versionInfo['product'];
+        $new_version = $versionInfo['version'];
+        $plugin_category = str_replace('plugins.', '', $versionInfo['productType']);
+
+        // Verify category if specified
+        if ($category && $category !== $plugin_category) {
+            throw new \Exception("Category mismatch: archive is '{$plugin_category}' but you specified '{$category}'");
+        }
+
+        // Find the plugin
+        $plugin_info = $this->find_plugin($plugin_name, $plugin_category);
+        if (!$plugin_info) {
+            throw new \Exception("Plugin not installed: {$plugin_name}. Use 'ojs plugin install' instead.");
+        }
+
+        // Get current version
+        $versionDao = \PKP\db\DAORegistry::getDAO('VersionDAO');
+        $current_version = $versionDao->getCurrentVersion("plugins.{$plugin_category}", $plugin_name);
+
+        if (!$current_version) {
+            throw new \Exception("Plugin not installed: {$plugin_name}. Use 'ojs plugin install' instead.");
+        }
+
+        $current_version_string = $current_version->getVersionString();
+
+        // Check version comparison unless forced
+        if (!$force) {
+            if (version_compare($new_version, $current_version_string, '<=')) {
+                throw new \Exception(
+                    "Upgrade cancelled: New version ({$new_version}) is not newer than installed version ({$current_version_string}).\n" .
+                    "Use --force to upgrade anyway."
+                );
+            }
+        }
+
+        OJS_CLI::log("Upgrading {$plugin_name} from {$current_version_string} to {$new_version}...");
+
+        // Perform upgrade using PluginHelper
+        // Note: upgradePlugin expects the database product name (without "plugin" suffix)
+        \Illuminate\Support\Facades\DB::beginTransaction();
+
+        try {
+            $version = $pluginHelper->upgradePlugin($plugin_category, $plugin_name, $file_path, basename($file_path));
+
+            \Illuminate\Support\Facades\DB::commit();
+
+            OJS_CLI::success("Plugin upgraded: {$plugin_name} (version {$version->getVersionString()})");
+        } catch (\Exception $e) {
+            if (\Illuminate\Support\Facades\DB::transactionLevel() > 0) {
+                \Illuminate\Support\Facades\DB::rollback();
+            }
+            throw new \Exception("Upgrade failed: " . $e->getMessage());
         }
     }
 
@@ -1274,17 +1259,17 @@ class Plugin_Command
      * @param string $plugin_name Plugin name
      * @param string|null $category Plugin category
      * @param bool $force Force upgrade
+     * @throws \Exception on failure (callers decide whether to exit or continue)
      */
     private function upgrade_from_gallery($plugin_name, $category, $force)
     {
         // Find the plugin
         $plugin_info = $this->find_plugin($plugin_name, $category);
         if (!$plugin_info) {
-            OJS_CLI::error("Plugin not found: {$plugin_name}");
+            throw new \Exception("Plugin not found: {$plugin_name}");
         }
 
         $found_category = $plugin_info['category'];
-        $plugin_obj = $plugin_info['plugin'];
 
         // Get directory name (find_plugin now returns this)
         $dir_name = $plugin_info['name'];
@@ -1295,7 +1280,7 @@ class Plugin_Command
         $current_version = $versionDao->getCurrentVersion("plugins.{$found_category}", $dir_name);
 
         if (!$current_version) {
-            OJS_CLI::error("Plugin not installed: {$plugin_name}. Use 'ojs plugin install' instead.");
+            throw new \Exception("Plugin not installed: {$plugin_name}. Use 'ojs plugin install' instead.");
         }
 
         $current_version_string = $current_version->getVersionString();
@@ -1303,60 +1288,51 @@ class Plugin_Command
         // Check for available update from gallery
         OJS_CLI::log("Checking plugin gallery for updates...");
 
+        $pluginGalleryDao = \PKP\db\DAORegistry::getDAO('PluginGalleryDAO');
+        $application = \APP\core\Application::get();
+
+        // Search for specific plugin using directory name
+        // Gallery uses directory names (e.g., "shariff")
+        $plugins = $pluginGalleryDao->getNewestCompatible($application, $found_category, $dir_name);
+
+        $galleryPlugin = null;
+        foreach ($plugins as $gp) {
+            if ($gp->getProduct() === $dir_name) {
+                $galleryPlugin = $gp;
+                break;
+            }
+        }
+
+        if (!$galleryPlugin) {
+            throw new \Exception("Plugin not found in gallery or not compatible with your OJS version.");
+        }
+
+        $available_version = $galleryPlugin->getVersion();
+
+        // Check if upgrade is needed unless forced
+        if (!$force) {
+            if (version_compare($available_version, $current_version_string, '<=')) {
+                OJS_CLI::line("Plugin is already at the latest version ({$current_version_string}).");
+                return;
+            }
+        }
+
+        OJS_CLI::log("Found update: {$available_version} (current: {$current_version_string})");
+
+        // Download the plugin
+        $download_url = $galleryPlugin->getReleasePackage();
+        $expected_md5 = $galleryPlugin->getReleaseMD5();
+        OJS_CLI::log("Downloading from: {$download_url}");
+
+        $temp_file = $this->download_plugin($download_url, $expected_md5);
+
         try {
-            $pluginGalleryDao = \PKP\db\DAORegistry::getDAO('PluginGalleryDAO');
-            $application = \APP\core\Application::get();
-
-            // Search for specific plugin using directory name
-            // Gallery uses directory names (e.g., "shariff")
-            $plugins = $pluginGalleryDao->getNewestCompatible($application, $found_category, $dir_name);
-
-            $galleryPlugin = null;
-            foreach ($plugins as $gp) {
-                if ($gp->getProduct() === $dir_name) {
-                    $galleryPlugin = $gp;
-                    break;
-                }
-            }
-
-            if (!$galleryPlugin) {
-                OJS_CLI::error("Plugin not found in gallery or not compatible with your OJS version.");
-            }
-
-            $available_version = $galleryPlugin->getVersion();
-
-            // Check if upgrade is needed unless forced
-            if (!$force) {
-                if (version_compare($available_version, $current_version_string, '<=')) {
-                    OJS_CLI::line("Plugin is already at the latest version ({$current_version_string}).");
-                    return;
-                }
-            }
-
-            OJS_CLI::log("Found update: {$available_version} (current: {$current_version_string})");
-
-            // Download the plugin
-            $download_url = $galleryPlugin->getReleasePackage();
-            $expected_md5 = $galleryPlugin->getReleaseMD5();
-            OJS_CLI::log("Downloading from: {$download_url}");
-
-            $temp_file = $this->download_plugin($download_url, $expected_md5);
-
-            try {
-                // Upgrade using local file method
-                $this->upgrade_from_file($temp_file, $found_category, true); // Force=true since we already checked
-
-                // Cleanup temp file
+            // Upgrade using local file method
+            $this->upgrade_from_file($temp_file, $found_category, true); // Force=true since we already checked
+        } finally {
+            if (file_exists($temp_file)) {
                 unlink($temp_file);
-            } catch (\Exception $e) {
-                // Cleanup temp file on error
-                if (file_exists($temp_file)) {
-                    unlink($temp_file);
-                }
-                throw $e;
             }
-        } catch (\Exception $e) {
-            OJS_CLI::error("Failed to upgrade from gallery: " . $e->getMessage());
         }
     }
 
@@ -1384,9 +1360,14 @@ class Plugin_Command
             }
         }
 
-        // Create temp file
-        $temp_file = tempnam(sys_get_temp_dir(), "ojs_plugin_{$plugin_name}_") . '.tar.gz';
-        if ($temp_file === false) {
+        // Create temp file (renamed to add the .tar.gz extension PharData needs)
+        $base_file = tempnam(sys_get_temp_dir(), "ojs_plugin_{$plugin_name}_");
+        if ($base_file === false) {
+            throw new \Exception("Failed to create temporary file");
+        }
+        $temp_file = $base_file . '.tar.gz';
+        if (!rename($base_file, $temp_file)) {
+            unlink($base_file);
             throw new \Exception("Failed to create temporary file");
         }
 
