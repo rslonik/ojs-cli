@@ -121,25 +121,67 @@ class Plugin_Command
             return $requested_context;
         }
 
-        // Check if plugin is truly site-wide by reading version.xml
         if ($this->is_plugin_sitewide($plugin)) {
             return \PKP\core\PKPApplication::SITE_CONTEXT_ID;
         }
 
-        // Default to first available journal for journal-specific plugins
+        // Journal-specific plugin: only auto-select when the choice is
+        // unambiguous. Guessing writes the setting to a context the user did
+        // not intend, and the command has no way to tell them which one.
         $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
         $journals = $journal_dao->getAll(true);
 
-        $first_journal = $journals->next();
-        if (!$first_journal) {
-            OJS_CLI::error("No journals found. Use --context=<journal-path> or create a journal first.");
+        $journal_paths = [];
+        while ($journal = $journals->next()) {
+            $journal_paths[$journal->getId()] = $journal->getPath();
         }
 
-        return $first_journal->getId();
+        if (empty($journal_paths)) {
+            OJS_CLI::error(
+                "This plugin is journal-specific and no journals exist.\n" .
+                "Create a journal first, or use --context=site-wide."
+            );
+        }
+
+        if (count($journal_paths) > 1) {
+            OJS_CLI::error(
+                "This plugin is journal-specific and this installation has several journals.\n" .
+                "Choose one with --context=<path>: " . implode(', ', $journal_paths) . "\n" .
+                "Or use --context=site-wide to write the setting at the site level."
+            );
+        }
+
+        return array_key_first($journal_paths);
     }
 
     /**
-     * Check if plugin is site-wide by reading version.xml
+     * Describe a context ID for display
+     *
+     * @param int|null $context_id Context ID (null for site-wide)
+     * @return string Human-readable context description
+     */
+    private function describe_context($context_id)
+    {
+        if ($context_id === \PKP\core\PKPApplication::SITE_CONTEXT_ID) {
+            return 'site-wide';
+        }
+
+        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
+        $journal = $journal_dao->getById($context_id);
+
+        return $journal ? "journal: {$journal->getPath()}" : "context {$context_id}";
+    }
+
+    /**
+     * Check whether a plugin stores its 'enabled' setting at the site level
+     *
+     * OJS decides this with Plugin::isSitePlugin() (see LazyLoadPlugin::getEnabled()),
+     * not with the <sitewide> element of version.xml, which is only recorded in the
+     * versions table. But some plugins derive isSitePlugin() from the current request
+     * (e.g. CustomBlockManagerPlugin returns true whenever there is no context), and
+     * under the CLI there never is one. Requiring both signals keeps the plugins that
+     * genuinely declare themselves site-wide and rejects the request-dependent ones,
+     * which are journal-specific everywhere the site actually reads them.
      *
      * @param object $plugin Plugin object
      * @return bool True if plugin is site-wide
@@ -147,14 +189,23 @@ class Plugin_Command
     private function is_plugin_sitewide($plugin)
     {
         try {
-            $pluginPath = $plugin->getPluginPath();
-            $versionFile = $pluginPath . '/version.xml';
+            // Request-derived implementations can fail outright without a
+            // request context; treat that as "not site-wide"
+            if (!$plugin->isSitePlugin()) {
+                return false;
+            }
+        } catch (\Throwable $e) {
+            return false;
+        }
+
+        try {
+            $versionFile = $plugin->getPluginPath() . '/version.xml';
 
             if (file_exists($versionFile)) {
                 $versionInfo = \PKP\site\VersionCheck::parseVersionXML($versionFile);
                 return !empty($versionInfo['sitewide']);
             }
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             // Ignore errors reading version.xml
         }
 
@@ -305,10 +356,7 @@ class Plugin_Command
 
         $category = $assoc_args['category'] ?? null;
         $context_path = $assoc_args['context'] ?? null;
-        $context_id = $this->resolve_context($context_path);
-        if ($context_id === self::CONTEXT_AUTO) {
-            $context_id = \PKP\core\PKPApplication::SITE_CONTEXT_ID;
-        }
+        $requested_context = $this->resolve_context($context_path);
 
         // Use find_plugin helper with 4-strategy search (directory name preferred)
         $plugin_info = $this->find_plugin($plugin_name, $category);
@@ -326,6 +374,10 @@ class Plugin_Command
         $dir_name = $plugin->getDirName();  // External identifier (display to user)
         $class_name = $plugin->getName();   // Internal identifier (for PluginSettingsDAO)
 
+        // Resolve the context the same way activate/deactivate do, so that the
+        // reported state is the one those commands would read and write
+        $context_id = $this->resolve_plugin_context($plugin, $requested_context);
+
         // Get plugin information
         $enabled = $plugin->getEnabled($context_id);
         $version = $this->get_plugin_version_string($plugin);
@@ -338,6 +390,7 @@ class Plugin_Command
         OJS_CLI::line('  Display Name: ' . $plugin->getDisplayName());
         OJS_CLI::line('  Category:     ' . $found_category);
         OJS_CLI::line('  Version:      ' . $version);
+        OJS_CLI::line('  Context:      ' . $this->describe_context($context_id));
         OJS_CLI::line('  Enabled:      ' . ($enabled ? 'Yes' : 'No'));
         OJS_CLI::line('  Mandatory:    ' . ($can_disable ? 'No' : 'Yes'));
         OJS_CLI::line('  Description:  ' . $plugin->getDescription());
@@ -371,18 +424,23 @@ class Plugin_Command
      * : Plugin category (if known, for faster lookup)
      *
      * [--context=<path>]
-     * : Journal context path (omit for site-wide)
+     * : Journal context path, or 'site-wide'. When omitted the context is
+     * detected from the plugin: site-wide for plugins that declare themselves
+     * as such, otherwise the journal - which must be unambiguous.
      *
      * [--all-contexts]
      * : Activate for all journals
      *
      * ## EXAMPLES
      *
-     *   # Activate plugin site-wide
+     *   # Activate plugin in its own context
      *   $ ojs plugin activate customBlockManager
      *
      *   # Activate for specific journal
      *   $ ojs plugin activate customBlockManager --context=my-journal
+     *
+     *   # Activate site-wide
+     *   $ ojs plugin activate betterPassword --context=site-wide
      *
      *   # Activate for all journals
      *   $ ojs plugin activate customBlockManager --all-contexts
@@ -419,15 +477,7 @@ class Plugin_Command
 
         $this->set_plugin_enabled($plugin, true, $context_id);
 
-        // Display message
-        if ($context_id === \PKP\core\PKPApplication::SITE_CONTEXT_ID) {
-            OJS_CLI::success("Plugin activated: {$plugin_name} (site-wide)");
-        } else {
-            $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
-            $journal = $journal_dao->getById($context_id);
-            $journal_path = $journal ? $journal->getPath() : "context {$context_id}";
-            OJS_CLI::success("Plugin activated: {$plugin_name} (journal: {$journal_path})");
-        }
+        OJS_CLI::success("Plugin activated: {$plugin_name} ({$this->describe_context($context_id)})");
     }
 
     /**
@@ -442,18 +492,23 @@ class Plugin_Command
      * : Plugin category (if known, for faster lookup)
      *
      * [--context=<path>]
-     * : Journal context path (omit for site-wide)
+     * : Journal context path, or 'site-wide'. When omitted the context is
+     * detected from the plugin: site-wide for plugins that declare themselves
+     * as such, otherwise the journal - which must be unambiguous.
      *
      * [--all-contexts]
      * : Deactivate for all journals
      *
      * ## EXAMPLES
      *
-     *   # Deactivate plugin site-wide
+     *   # Deactivate plugin in its own context
      *   $ ojs plugin deactivate customBlockManager
      *
      *   # Deactivate for specific journal
      *   $ ojs plugin deactivate customBlockManager --context=my-journal
+     *
+     *   # Deactivate site-wide
+     *   $ ojs plugin deactivate betterPassword --context=site-wide
      */
     public function deactivate($args, $assoc_args)
     {
@@ -492,15 +547,7 @@ class Plugin_Command
 
         $this->set_plugin_enabled($plugin, false, $context_id);
 
-        // Display message
-        if ($context_id === \PKP\core\PKPApplication::SITE_CONTEXT_ID) {
-            OJS_CLI::success("Plugin deactivated: {$plugin_name} (site-wide)");
-        } else {
-            $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
-            $journal = $journal_dao->getById($context_id);
-            $journal_path = $journal ? $journal->getPath() : "context {$context_id}";
-            OJS_CLI::success("Plugin deactivated: {$plugin_name} (journal: {$journal_path})");
-        }
+        OJS_CLI::success("Plugin deactivated: {$plugin_name} ({$this->describe_context($context_id)})");
     }
 
     /**
@@ -524,6 +571,49 @@ class Plugin_Command
             }
         }
         $plugin->updateSetting($context_id, 'enabled', $enabled, 'bool');
+
+        if (!$enabled) {
+            $this->clear_registration_agency($plugin, $context_id);
+        }
+    }
+
+    /**
+     * Reproduce the cleanup a single-argument setEnabled() would have done
+     *
+     * CrossrefPlugin::setEnabled() and DatacitePlugin::setEnabled() take only
+     * the flag, so they resolve the context from the request and cannot be
+     * called here. They also clear the journal's configured DOI registration
+     * agency on disable; without this, deactivating leaves the journal pointing
+     * at a disabled agency, a state the web UI never produces.
+     *
+     * @param object $plugin Plugin object
+     * @param int|null $context_id Context ID (null for site-wide)
+     */
+    private function clear_registration_agency($plugin, $context_id)
+    {
+        if ($context_id === \PKP\core\PKPApplication::SITE_CONTEXT_ID) {
+            return;
+        }
+
+        if (!$plugin instanceof \APP\plugins\IDoiRegistrationAgency) {
+            return;
+        }
+
+        $contextDao = \APP\core\Application::getContextDAO();
+        $context = $contextDao->getById($context_id);
+
+        if (!$context) {
+            return;
+        }
+
+        $agency = \PKP\context\Context::SETTING_CONFIGURED_REGISTRATION_AGENCY;
+        if ($context->getData($agency) !== $plugin->getName()) {
+            return;
+        }
+
+        $context->setData($agency, \PKP\context\Context::SETTING_NO_REGISTRATION_AGENCY);
+        $contextDao->updateObject($context);
+        OJS_CLI::log('Cleared the journal\'s configured DOI registration agency');
     }
 
     /**
@@ -584,6 +674,69 @@ class Plugin_Command
     }
 
     /**
+     * Look up an installed plugin in the versions table
+     *
+     * Used instead of find_plugin() wherever PluginHelper is invoked afterwards.
+     * find_plugin() calls PluginRegistry::loadCategory(), and every registration
+     * hooks that plugin's install migration onto Installer::postInstall, which
+     * PluginHelper fires - creating tables for plugins that were never installed.
+     * The versions table answers the same question without touching the registry.
+     *
+     * @param string $plugin_name Plugin directory name
+     * @param string|null $category Optional category to restrict the search
+     * @return array|null ['name' => ..., 'category' => ...] or null if not installed
+     */
+    private function find_installed_product($plugin_name, $category = null)
+    {
+        $query = \Illuminate\Support\Facades\DB::table('versions')
+            ->where('current', 1)
+            ->whereRaw('LOWER(product) = ?', [strtolower($plugin_name)]);
+
+        if ($category) {
+            $query->where('product_type', "plugins.{$category}");
+        } else {
+            $query->where('product_type', 'like', 'plugins.%');
+        }
+
+        $row = $query->first();
+        if (!$row) {
+            return null;
+        }
+
+        return [
+            'name' => $row->product,
+            'category' => str_replace('plugins.', '', $row->product_type)
+        ];
+    }
+
+    /**
+     * List every installed plugin from the versions table
+     *
+     * @param string|null $category Optional category filter
+     * @return array List of ['name' => ..., 'category' => ...]
+     */
+    private function get_installed_products($category = null)
+    {
+        $query = \Illuminate\Support\Facades\DB::table('versions')->where('current', 1);
+
+        if ($category) {
+            $query->where('product_type', "plugins.{$category}");
+        } else {
+            $query->where('product_type', 'like', 'plugins.%');
+        }
+
+        $products = [];
+        foreach ($query->get() as $row) {
+            $products[] = [
+                'name' => $row->product,
+                'category' => str_replace('plugins.', '', $row->product_type)
+            ];
+        }
+
+        return $products;
+    }
+
+    /**
      * Load plugin object
      *
      * @param string $category Plugin category
@@ -611,6 +764,28 @@ class Plugin_Command
 
 
     /**
+     * Refuse --all-contexts for a site-wide plugin
+     *
+     * OJS reads such a plugin's 'enabled' setting only at the site level, so
+     * writing one row per journal would leave rows nothing ever reads while
+     * the plugin's real state stays unchanged.
+     *
+     * @param object $plugin Plugin object
+     * @param string $plugin_name Plugin name as typed by the user
+     */
+    private function reject_all_contexts_for_sitewide($plugin, $plugin_name)
+    {
+        if (!$this->is_plugin_sitewide($plugin)) {
+            return;
+        }
+
+        OJS_CLI::error(
+            "Plugin '{$plugin_name}' is site-wide, so --all-contexts does not apply.\n" .
+            "Use --context=site-wide instead."
+        );
+    }
+
+    /**
      * Activates plugin for all journals
      *
      * @param string $plugin_name Plugin name
@@ -624,6 +799,8 @@ class Plugin_Command
             OJS_CLI::error("Plugin not found: {$plugin_name}");
         }
         $plugin = $plugin_info['plugin'];
+
+        $this->reject_all_contexts_for_sitewide($plugin, $plugin_name);
 
         $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
         $journals = $journal_dao->getAll(true); // enabled journals only
@@ -676,6 +853,8 @@ class Plugin_Command
         if (!$plugin->getCanDisable()) {
             OJS_CLI::error("Plugin '{$plugin_name}' is mandatory and cannot be deactivated.");
         }
+
+        $this->reject_all_contexts_for_sitewide($plugin, $plugin_name);
 
         $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
         $journals = $journal_dao->getAll(true); // enabled journals only
@@ -781,22 +960,19 @@ class Plugin_Command
 
         OJS_CLI::log("Installing plugin from: {$file_path}");
 
-        // Use PluginHelper to install
+        // Use PluginHelper to install. No transaction is opened around it: the
+        // installer runs schema migrations, and DDL implicitly commits on
+        // MySQL/MariaDB, so a wrapping transaction cannot roll the install back
+        // and would only make the failure report inaccurate. PluginHelper does
+        // its own cleanup (it removes the plugin directory on failure).
         $pluginHelper = new \PKP\plugins\PluginHelper();
 
-        // Start transaction
-        \Illuminate\Support\Facades\DB::beginTransaction();
-
         try {
-            // Install plugin (DB operations first)
             $version = $pluginHelper->installPlugin($file_path, basename($file_path));
 
             if (!$version) {
                 throw new \Exception("Plugin installation failed - no version returned");
             }
-
-            // Commit database changes
-            \Illuminate\Support\Facades\DB::commit();
 
             // Get plugin info
             $product = $version->getProduct();
@@ -816,25 +992,13 @@ class Plugin_Command
 
                     $this->set_plugin_enabled($plugin, true, $activation_context);
 
-                    if ($activation_context === \PKP\core\PKPApplication::SITE_CONTEXT_ID) {
-                        OJS_CLI::success("Plugin activated (site-wide)");
-                    } else {
-                        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
-                        $journal = $journal_dao->getById($activation_context);
-                        $journal_path = $journal ? $journal->getPath() : "context {$activation_context}";
-                        OJS_CLI::success("Plugin activated (journal: {$journal_path})");
-                    }
+                    OJS_CLI::success("Plugin activated ({$this->describe_context($activation_context)})");
                 } else {
                     OJS_CLI::warning("Plugin installed but could not be activated automatically");
                 }
             }
 
         } catch (\Exception $e) {
-            // Rollback database changes
-            if (\Illuminate\Support\Facades\DB::transactionLevel() > 0) {
-                \Illuminate\Support\Facades\DB::rollback();
-            }
-
             OJS_CLI::error("Installation failed: " . $e->getMessage());
         }
     }
@@ -987,43 +1151,85 @@ class Plugin_Command
             }
         }
 
-        // Get actual path from plugin object
+        // Get actual path from plugin object. A plugin may live under the
+        // application and/or under lib/pkp; PluginGridHandler removes both.
         $plugin_path = $plugin_obj->getPluginPath();
+        $product_name = basename($plugin_path);
+        $lib_plugin_path = (defined('PKP_LIB_PATH') ? PKP_LIB_PATH : 'lib/pkp') . '/' . $plugin_path;
 
-        // Get version info
-        $versionDao = \PKP\db\DAORegistry::getDAO('VersionDAO');
-        $version = $versionDao->getCurrentVersion("plugins.{$found_category}", basename($plugin_path));
-
-
-        // Delete version record from database
-        if ($version) {
-            $versionDao->disableVersion("plugins.{$found_category}", basename($plugin_path));
-            OJS_CLI::log("Disabled plugin version in database");
-        }
-
-        // Delete plugin settings from database
+        // Read everything needed from the plugin object before its files go away
         // plugin_settings stores the lowercased class name (see PluginSettingsDAO),
         // not the directory name the user typed
-        \Illuminate\Support\Facades\DB::table('plugin_settings')
-            ->where('plugin_name', strtolower($plugin_obj->getName()))
-            ->delete();
-        OJS_CLI::log("Deleted plugin settings from database");
+        $settings_name = strtolower($plugin_obj->getName());
 
-        // Delete plugin files using actual plugin path
+        // Delete the files first. The database is only touched once the files
+        // are actually gone, so a failed removal cannot leave a plugin that is
+        // installed on disk but marked uninstalled in the database.
         $fileManager = new \PKP\file\FileManager();
         $deleted_files = false;
 
-        if ($plugin_path && is_dir($plugin_path)) {
-            OJS_CLI::log("Deleting files from: {$plugin_path}");
-            $fileManager->rmtree($plugin_path);
-            $deleted_files = true;
+        foreach ([$plugin_path, $lib_plugin_path] as $path) {
+            if (is_dir($path)) {
+                OJS_CLI::log("Deleting files from: {$path}");
+                $fileManager->rmtree($path);
+                $deleted_files = true;
+            }
+        }
+
+        if (is_dir($plugin_path) || is_dir($lib_plugin_path)) {
+            OJS_CLI::error(
+                "Failed to delete the files of plugin '{$plugin_name}'.\n" .
+                "The database was left unchanged. Check filesystem permissions and try again."
+            );
         }
 
         if (!$deleted_files) {
             OJS_CLI::warning("No plugin files found to delete (may be already removed)");
         }
 
+        // Files are gone: now retire the version record
+        $versionDao = \PKP\db\DAORegistry::getDAO('VersionDAO');
+        $version = $versionDao->getCurrentVersion("plugins.{$found_category}", $product_name);
+
+        if ($version) {
+            $versionDao->disableVersion("plugins.{$found_category}", $product_name);
+            OJS_CLI::log("Disabled plugin version in database");
+        }
+
+        $this->delete_plugin_settings($settings_name);
+
         OJS_CLI::success("Plugin deleted: {$plugin_name}");
+    }
+
+    /**
+     * Remove every plugin_settings row of a plugin, in all contexts
+     *
+     * Goes through PluginSettingsDAO rather than deleting the rows directly:
+     * the DAO caches settings for 24h in a store shared with the running site,
+     * so a raw DELETE would leave the web app reading the deleted values.
+     *
+     * @param string $plugin_name Lowercased plugin class name, as stored in plugin_settings
+     */
+    private function delete_plugin_settings($plugin_name)
+    {
+        $context_ids = \Illuminate\Support\Facades\DB::table('plugin_settings')
+            ->where('plugin_name', $plugin_name)
+            ->distinct()
+            ->pluck('context_id');
+
+        if ($context_ids->isEmpty()) {
+            return;
+        }
+
+        $pluginSettingsDao = \PKP\db\DAORegistry::getDAO('PluginSettingsDAO');
+        foreach ($context_ids as $context_id) {
+            $pluginSettingsDao->deleteSettingsByPlugin(
+                $context_id === null ? null : (int)$context_id,
+                $plugin_name
+            );
+        }
+
+        OJS_CLI::log("Deleted plugin settings from database");
     }
 
     /**
@@ -1097,13 +1303,30 @@ class Plugin_Command
         OJS_CLI::line('');
         OJS_CLI::log('Checking for plugin updates...');
 
-        // Get all plugins with their update status
-        $plugins = $this->get_plugins($category, null, 'all');
+        // Read the installed plugins from the versions table instead of
+        // get_plugins(), which would register every plugin on disk with the
+        // PluginRegistry before the upgrades run - see find_installed_product()
+        $versionDao = \PKP\db\DAORegistry::getDAO('VersionDAO');
+        $plugins_to_upgrade = [];
 
-        // Filter for plugins with available updates
-        $plugins_to_upgrade = array_filter($plugins, function($plugin) {
-            return $plugin['update'] === 'available';
-        });
+        foreach ($this->get_installed_products($category) as $product) {
+            $installed = $versionDao->getCurrentVersion("plugins.{$product['category']}", $product['name']);
+            if (!$installed) {
+                continue;
+            }
+
+            $current_version = $installed->getVersionString();
+            $update = $this->check_gallery_update($product['name'], $current_version);
+
+            if ($update['status'] === 'available') {
+                $plugins_to_upgrade[] = [
+                    'name' => $product['name'],
+                    'category' => $product['category'],
+                    'version' => $current_version,
+                    'update_version' => $update['version']
+                ];
+            }
+        }
 
         if (empty($plugins_to_upgrade)) {
             OJS_CLI::line('No plugin updates available.');
@@ -1207,13 +1430,10 @@ class Plugin_Command
             throw new \Exception("Category mismatch: archive is '{$plugin_category}' but you specified '{$category}'");
         }
 
-        // Find the plugin
-        $plugin_info = $this->find_plugin($plugin_name, $plugin_category);
-        if (!$plugin_info) {
-            throw new \Exception("Plugin not installed: {$plugin_name}. Use 'ojs plugin install' instead.");
-        }
-
-        // Get current version
+        // Get current version. Deliberately not going through find_plugin():
+        // that registers every plugin of the category with the PluginRegistry,
+        // and each registration hooks the plugin's install migration onto
+        // Installer::postInstall, which PluginHelper fires below.
         $versionDao = \PKP\db\DAORegistry::getDAO('VersionDAO');
         $current_version = $versionDao->getCurrentVersion("plugins.{$plugin_category}", $plugin_name);
 
@@ -1235,20 +1455,15 @@ class Plugin_Command
 
         OJS_CLI::log("Upgrading {$plugin_name} from {$current_version_string} to {$new_version}...");
 
-        // Perform upgrade using PluginHelper
+        // Perform upgrade using PluginHelper. As with install, no transaction is
+        // opened: upgrade.xml migrations issue DDL, which implicitly commits on
+        // MySQL/MariaDB, so the rollback would be a silent no-op.
         // Note: upgradePlugin expects the database product name (without "plugin" suffix)
-        \Illuminate\Support\Facades\DB::beginTransaction();
-
         try {
             $version = $pluginHelper->upgradePlugin($plugin_category, $plugin_name, $file_path, basename($file_path));
 
-            \Illuminate\Support\Facades\DB::commit();
-
             OJS_CLI::success("Plugin upgraded: {$plugin_name} (version {$version->getVersionString()})");
         } catch (\Exception $e) {
-            if (\Illuminate\Support\Facades\DB::transactionLevel() > 0) {
-                \Illuminate\Support\Facades\DB::rollback();
-            }
             throw new \Exception("Upgrade failed: " . $e->getMessage());
         }
     }
@@ -1263,25 +1478,20 @@ class Plugin_Command
      */
     private function upgrade_from_gallery($plugin_name, $category, $force)
     {
-        // Find the plugin
-        $plugin_info = $this->find_plugin($plugin_name, $category);
-        if (!$plugin_info) {
-            throw new \Exception("Plugin not found: {$plugin_name}");
-        }
-
-        $found_category = $plugin_info['category'];
-
-        // Get directory name (find_plugin now returns this)
-        $dir_name = $plugin_info['name'];
-
-        // Get current version using directory name
-        // VersionDAO stores directory names (e.g., "shariff")
-        $versionDao = \PKP\db\DAORegistry::getDAO('VersionDAO');
-        $current_version = $versionDao->getCurrentVersion("plugins.{$found_category}", $dir_name);
-
-        if (!$current_version) {
+        // Resolve the plugin from the versions table rather than find_plugin():
+        // see find_installed_product() for why the registry is avoided here
+        $installed = $this->find_installed_product($plugin_name, $category);
+        if (!$installed) {
             throw new \Exception("Plugin not installed: {$plugin_name}. Use 'ojs plugin install' instead.");
         }
+
+        $found_category = $installed['category'];
+
+        // VersionDAO stores directory names (e.g., "shariff")
+        $dir_name = $installed['name'];
+
+        $versionDao = \PKP\db\DAORegistry::getDAO('VersionDAO');
+        $current_version = $versionDao->getCurrentVersion("plugins.{$found_category}", $dir_name);
 
         $current_version_string = $current_version->getVersionString();
 
@@ -1513,6 +1723,19 @@ class Plugin_Command
      */
     private function check_plugin_update($plugin, $current_version)
     {
+        // Gallery uses directory names (e.g., "shariff")
+        return $this->check_gallery_update($plugin->getDirName(), $current_version);
+    }
+
+    /**
+     * Check the gallery for a newer version of a plugin
+     *
+     * @param string $dir_name Plugin directory name
+     * @param string $current_version Current installed version
+     * @return array ['status' => 'none'|'available', 'version' => '']
+     */
+    private function check_gallery_update($dir_name, $current_version)
+    {
         // Skip if version is unknown
         if ($current_version === 'unknown') {
             return ['status' => 'none', 'version' => ''];
@@ -1522,10 +1745,6 @@ class Plugin_Command
             // Use PluginGalleryDAO to get latest compatible version
             $pluginGalleryDao = \PKP\db\DAORegistry::getDAO('PluginGalleryDAO');
             $application = \APP\core\Application::get();
-
-            // Use directory name for gallery search
-            // Gallery uses directory names (e.g., "shariff")
-            $dir_name = $plugin->getDirName();
 
             // Search for specific plugin using directory name
             $plugins = $pluginGalleryDao->getNewestCompatible($application, null, $dir_name);

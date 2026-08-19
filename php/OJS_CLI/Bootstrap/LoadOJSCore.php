@@ -90,10 +90,13 @@ class LoadOJSCore implements BootstrapStep
             Utils\debug("Router configured");
         }
 
-        // Load generic plugins by default (OJS CLI standard)
+        // Load enabled generic plugins, matching what Dispatcher does for web
+        // requests. Loading disabled ones too (the CommandLineTool default)
+        // would register their install migrations on Installer::postInstall,
+        // which PluginHelper fires during plugin install/upgrade.
         if (class_exists('\\PKP\\plugins\\PluginRegistry')) {
-            \PKP\plugins\PluginRegistry::loadCategory('generic');
-            Utils\debug("Generic plugins loaded");
+            \PKP\plugins\PluginRegistry::loadCategory('generic', true);
+            Utils\debug("Enabled generic plugins loaded");
         }
     }
 }
