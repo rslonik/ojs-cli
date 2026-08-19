@@ -28,11 +28,31 @@ jobs:
       - name: Install production dependencies
         run: composer install --no-dev --optimize-autoloader --prefer-dist
 
+      - name: Stamp version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          version="${RELEASE_VERSION#v}"
+          sed -i "s/@package_version@/${version}/" php/ojs-cli.php
+          if grep -q '@package_version@' php/ojs-cli.php; then
+            echo "::error::version placeholder not found in php/ojs-cli.php"
+            exit 1
+          fi
+          echo "Stamped version ${version}"
+
       - name: Build PHAR
         run: box compile
 
       - name: Verify PHAR
-        run: php ojs.phar --version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          version="${RELEASE_VERSION#v}"
+          php ojs.phar --version
+          if ! php ojs.phar --version | grep -qF "${version}"; then
+            echo "::error::PHAR does not report version ${version}"
+            exit 1
+          fi
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

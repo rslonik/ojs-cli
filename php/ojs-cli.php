@@ -7,7 +7,11 @@
  */
 
 // Define version
-define('OJS_CLI_VERSION', '1.0.0-dev');
+// The release workflow substitutes the placeholder below with the release tag
+// before building the PHAR. Running from a source checkout leaves it untouched.
+$ojs_cli_version = '@package_version@';
+define('OJS_CLI_VERSION', str_starts_with($ojs_cli_version, '@') ? '1.0.0-dev' : $ojs_cli_version);
+unset($ojs_cli_version);
 
 // Define root directory
 define('OJS_CLI_ROOT', dirname(__DIR__));

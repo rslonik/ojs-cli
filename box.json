@@ -11,6 +11,5 @@
             "exclude": ["tests", "test", "doc", "docs", "examples", "Tests"]
         }
     ],
-    "compression": "GZ",
-    "git-version": "package_version"
+    "compression": "GZ"
 }
