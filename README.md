@@ -143,8 +143,8 @@ ojs plugin upgrade customBlockManager --force
 ### Recommended: download the prebuilt binary
 
 ```bash
-curl -fsSL https://github.com/rslonik/ojs-cli/releases/latest/download/ojs.phar \
-  -o /usr/local/bin/ojs
+mkdir -p ~/.local/bin
+curl -fsSL https://github.com/rslonik/ojs-cli/releases/latest/download/ojs.phar -o ~/.local/bin/ojs
 chmod +x /usr/local/bin/ojs
 ojs --version
 ```
