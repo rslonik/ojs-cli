@@ -152,6 +152,28 @@ ojs --version
 
 Requires PHP 8.2+ with the `phar`, `curl`, and `zip` extensions on the target system.
 
+#### Choosing the PHP version
+
+The PHAR runs with the first `php` found on `PATH`. On hosts with several
+PHP versions installed (e.g. the CLI default is 8.1 while OJS runs on 8.3
+via FPM), invoke the PHAR through the desired binary:
+
+```bash
+php8.3 "$(command -v ojs)" plugin list --path=/var/www/ojs
+```
+
+Or define a shell alias:
+
+```bash
+alias ojs='php8.3 ~/.local/bin/ojs'
+```
+
+When running from source (`bin/ojs`), set `OJS_CLI_PHP` instead:
+
+```bash
+OJS_CLI_PHP=/usr/bin/php8.3 bin/ojs plugin list --path=/var/www/ojs
+```
+
 ### From source (development)
 
 ```bash
