@@ -173,6 +173,11 @@ class Runner
         $assoc_args = $parsed['assoc_args'];
 
         // Handle no command
+        if (empty($args) && isset($assoc_args['version'])) {
+            \OJS_CLI::line('OJS-CLI version ' . OJS_CLI_VERSION);
+            exit(0);
+        }
+
         if (empty($args)) {
             \OJS_CLI::usage();
             exit(0);
