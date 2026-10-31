@@ -4,7 +4,8 @@
 ### OJS-CLI Manual Test Script
 ###
 ### This script runs manual tests for ojs-cli plugin commands
-### It requires a working OJS 3.5 installation
+### It requires a working OJS 3.5 installation with at least one journal.
+### The hypothesis plugin is installed from the gallery if missing.
 ###
 ### Usage:
 ###   ./manual_test.sh [OPTIONS]
@@ -43,6 +44,7 @@ TEST_PLUGIN="hypothesis"  # Plugin to use for testing
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OJS_CLI_ROOT="$(dirname "$SCRIPT_DIR")"
 OJS_CLI_BIN="${OJS_CLI_ROOT}/bin/ojs"
+PHP_BIN="${OJS_CLI_PHP:-php}"
 
 ###
 ### Helper Functions
@@ -103,26 +105,23 @@ run_test() {
         echo "Exit code: $exit_code"
     fi
 
+    # Failures are counted, never returned: under "set -e" a non-zero
+    # return would abort the whole run before the summary
     if [[ $expected_result -eq 0 ]]; then
         # Test should succeed
         if [[ $exit_code -eq 0 ]]; then
             print_pass "$test_name"
-            echo "$output"
-            return 0
         else
             print_fail "$test_name (expected success, got failure)"
             echo "$output"
-            return 1
         fi
     else
         # Test should fail
         if [[ $exit_code -ne 0 ]]; then
             print_pass "$test_name (correctly failed)"
-            return 0
         else
             print_fail "$test_name (expected failure, got success)"
             echo "$output"
-            return 1
         fi
     fi
 }
@@ -144,16 +143,62 @@ run_test_contains() {
     if output=$(eval "$test_command" 2>&1); then
         if echo "$output" | grep -q "$expected_string"; then
             print_pass "$test_name"
-            return 0
         else
             print_fail "$test_name (string not found in output)"
             echo "Output: $output"
-            return 1
         fi
     else
         print_fail "$test_name (command failed)"
         echo "Output: $output"
-        return 1
+    fi
+}
+
+# Checks a plugin's "enabled" field by parsing the JSON list; grep can't,
+# because the JSON is pretty-printed across lines
+run_test_plugin_state() {
+    local test_name="$1"
+    local plugin_name="$2"
+    local expected_state="$3"
+    local state
+
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
+    print_test "$test_name"
+
+    state=$($OJS_CLI_BIN plugin list --format=json 2>/dev/null | "$PHP_BIN" -r '
+        $name = $argv[1];
+        foreach (json_decode(stream_get_contents(STDIN), true) ?: [] as $plugin) {
+            if ($plugin["name"] === $name) {
+                echo $plugin["enabled"];
+                exit;
+            }
+        }
+        echo "missing";
+    ' "$plugin_name")
+
+    if [[ "$state" == "$expected_state" ]]; then
+        print_pass "$test_name"
+    else
+        print_fail "$test_name (enabled: $state, expected: $expected_state)"
+    fi
+}
+
+# The suites need a journal (hypothesis is journal-specific) and the plugin
+check_preconditions() {
+    local output
+
+    if ! $OJS_CLI_BIN plugin list --format=json 2>/dev/null | grep -q '"name": "hypothesis"'; then
+        echo "Installing $TEST_PLUGIN from the gallery (test precondition)..."
+        $OJS_CLI_BIN plugin install "$TEST_PLUGIN" >/dev/null || {
+            echo -e "${RED}Error: could not install $TEST_PLUGIN${NC}"
+            exit 1
+        }
+    fi
+
+    if ! output=$($OJS_CLI_BIN plugin info "$TEST_PLUGIN" 2>&1); then
+        echo -e "${RED}Error: precondition failed:${NC}"
+        echo "$output"
+        echo "Create a journal in this OJS installation, then rerun."
+        exit 1
     fi
 }
 
@@ -236,7 +281,6 @@ test_suite_3_plugin_activate_deactivate() {
     $OJS_CLI_BIN plugin deactivate hypothesis 2>/dev/null || true
     print_pass "3.1 Cleanup done"
     TESTS_TOTAL=$((TESTS_TOTAL + 1))
-    TESTS_PASSED=$((TESTS_PASSED + 1))
 
     # Test 3.2: Activate with directory name
     run_test "3.2 Activate with directory name" \
@@ -244,9 +288,8 @@ test_suite_3_plugin_activate_deactivate() {
         0
 
     # Test 3.3: Verify activation in list
-    run_test_contains "3.3 Verify plugin shows as enabled" \
-        "$OJS_CLI_BIN plugin list --format=json" \
-        '"name": "hypothesis".*"enabled": "Yes"'
+    run_test_plugin_state "3.3 Verify plugin shows as enabled" \
+        hypothesis Yes
 
     # Test 3.4: Deactivate with directory name
     run_test "3.4 Deactivate with directory name" \
@@ -254,9 +297,8 @@ test_suite_3_plugin_activate_deactivate() {
         0
 
     # Test 3.5: Verify deactivation in list
-    run_test_contains "3.5 Verify plugin shows as disabled" \
-        "$OJS_CLI_BIN plugin list --format=json" \
-        '"name": "hypothesis".*"enabled": "No"'
+    run_test_plugin_state "3.5 Verify plugin shows as disabled" \
+        hypothesis No
 
     # Test 3.6: Activate with class name (should fail)
     run_test "3.6 Activate with class name (should fail)" \
@@ -295,10 +337,11 @@ test_suite_5_plugin_delete() {
     $OJS_CLI_BIN plugin activate hypothesis 2>/dev/null || true
     print_pass "5.1 Plugin enabled"
     TESTS_TOTAL=$((TESTS_TOTAL + 1))
-    TESTS_PASSED=$((TESTS_PASSED + 1))
 
+    # No --force: it deliberately bypasses the enabled check. stdin from
+    # /dev/null so a missing guard fails at the prompt instead of hanging.
     run_test "5.2 Delete enabled plugin (should fail)" \
-        "$OJS_CLI_BIN plugin delete hypothesis --force" \
+        "$OJS_CLI_BIN plugin delete hypothesis < /dev/null" \
         1
 
     # Test 5.3: Delete non-existent plugin
@@ -311,7 +354,6 @@ test_suite_5_plugin_delete() {
     $OJS_CLI_BIN plugin deactivate hypothesis 2>/dev/null || true
     print_pass "5.4 Cleanup done"
     TESTS_TOTAL=$((TESTS_TOTAL + 1))
-    TESTS_PASSED=$((TESTS_PASSED + 1))
 }
 
 test_suite_6_plugin_upgrade() {
@@ -320,8 +362,14 @@ test_suite_6_plugin_upgrade() {
     print_skip "6.1 Upgrade from local file (requires manual setup)"
     TESTS_TOTAL=$((TESTS_TOTAL + 1))
 
-    print_skip "6.2 Upgrade from gallery (may modify installation)"
-    TESTS_TOTAL=$((TESTS_TOTAL + 1))
+    # Same version as installed, so this only refreshes the plugin files
+    run_test "6.2 Reinstall current version from gallery with --force" \
+        "$OJS_CLI_BIN plugin upgrade hypothesis --force" \
+        0
+
+    run_test "6.2b Upgrade to same version without --force is a no-op" \
+        "$OJS_CLI_BIN plugin upgrade hypothesis" \
+        0
 
     # Test 6.3: Upgrade non-existent plugin
     run_test "6.3 Upgrade non-existent plugin" \
@@ -345,6 +393,10 @@ test_suite_7_error_handling() {
     run_test "7.3 Activate help command" \
         "$OJS_CLI_BIN plugin activate --help" \
         0
+
+    run_test_contains "7.3b Short help flag shows usage" \
+        "$OJS_CLI_BIN plugin info -h" \
+        'SYNOPSIS'
 
     # Test 7.4: Case-insensitive plugin name
     run_test "7.4 Case-insensitive plugin name" \
@@ -390,6 +442,8 @@ main() {
             exit 1
         }
     fi
+
+    check_preconditions
 
     # Run test suites
     test_suite_1_plugin_list
