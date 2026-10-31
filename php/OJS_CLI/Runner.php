@@ -204,6 +204,14 @@ class Runner
         // Execute subcommand
         if ($command instanceof \OJS_CLI\Dispatcher\Subcommand) {
             $parsed_remaining = Utils\parse_args($remaining_args);
+
+            // Before invoking: commands validate their arguments first and
+            // would reject "plugin activate --help" as a missing plugin name
+            if (isset($assoc_args['help']) || in_array('-h', $parsed_remaining['args'], true)) {
+                $command->show_usage();
+                exit(0);
+            }
+
             $command->invoke($parsed_remaining['args'], $assoc_args);
         } else {
             \OJS_CLI::error("Unknown command type");
