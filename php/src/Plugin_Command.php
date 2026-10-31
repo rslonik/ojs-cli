@@ -1244,7 +1244,8 @@ class Plugin_Command
      * : Plugin category (if known, for faster lookup)
      *
      * [--force]
-     * : Skip version check and force upgrade
+     * : Reinstall the plugin files when the version is the same as the
+     * installed one (downgrades are always refused)
      *
      * [--all]
      * : Upgrade all plugins with available updates
@@ -1257,7 +1258,7 @@ class Plugin_Command
      *   # Upgrade from local file
      *   $ ojs plugin upgrade /path/to/plugin.tar.gz
      *
-     *   # Force upgrade even if version appears current
+     *   # Reinstall the current version's files
      *   $ ojs plugin upgrade shariffplugin --force
      *
      *   # Upgrade all plugins with available updates
@@ -1442,15 +1443,29 @@ class Plugin_Command
         }
 
         $current_version_string = $current_version->getVersionString();
+        $comparison = version_compare($new_version, $current_version_string);
 
-        // Check version comparison unless forced
-        if (!$force) {
-            if (version_compare($new_version, $current_version_string, '<=')) {
-                throw new \Exception(
-                    "Upgrade cancelled: New version ({$new_version}) is not newer than installed version ({$current_version_string}).\n" .
-                    "Use --force to upgrade anyway."
-                );
-            }
+        if ($comparison <= 0 && !$force) {
+            throw new \Exception(
+                "Upgrade cancelled: New version ({$new_version}) is not newer than installed version ({$current_version_string}).\n" .
+                "Use --force to reinstall the same version."
+            );
+        }
+
+        if ($comparison < 0) {
+            throw new \Exception(
+                "Downgrade not supported: archive version ({$new_version}) is older than installed version ({$current_version_string}).\n" .
+                "OJS cannot roll back plugin database migrations."
+            );
+        }
+
+        // PluginHelper::upgradePlugin() rejects any version that is not newer,
+        // so a forced same-version upgrade only refreshes the files
+        if ($comparison === 0) {
+            OJS_CLI::log("Reinstalling {$plugin_name} {$new_version} files...");
+            $this->reinstall_plugin_files($file_path, $plugin_category, $plugin_name);
+            OJS_CLI::success("Plugin files reinstalled: {$plugin_name} (version {$new_version})");
+            return;
         }
 
         OJS_CLI::log("Upgrading {$plugin_name} from {$current_version_string} to {$new_version}...");
@@ -1643,34 +1658,43 @@ class Plugin_Command
      */
     private function get_version_from_archive($filePath, $originalFileName)
     {
+        return $this->with_extracted_archive($filePath, $originalFileName, function ($plugin_dir) {
+            $versionInfo = \PKP\site\VersionCheck::parseVersionXML($plugin_dir . 'version.xml');
+
+            return [
+                'product' => $versionInfo['application'], // parseVersionXML returns 'application'
+                'productType' => $versionInfo['type'],     // parseVersionXML returns 'type'
+                'version' => $versionInfo['release']
+            ];
+        });
+    }
+
+    /**
+     * Extract a plugin archive, run a callback on it, then clean up
+     *
+     * Mirrors PluginHelper::extractPlugin(), which is private in pkp-lib.
+     *
+     * @param string $filePath Path to archive
+     * @param string $originalFileName Original filename
+     * @param callable $on_extracted Receives the plugin directory (with trailing slash)
+     * @return mixed Result of the callback
+     */
+    private function with_extracted_archive($filePath, $originalFileName, callable $on_extracted)
+    {
         $fileManager = new \PKP\file\FileManager();
         $extension = $fileManager->parseFileExtension($originalFileName);
         $baseName = basename($originalFileName, ".{$extension}") ?: 'plugin';
 
-        // Extract to temp directory
         $extractPath = rtrim(sys_get_temp_dir(), '\\/') . "/{$baseName}" . substr(md5(random_int(0, PHP_INT_MAX)), 0, 10) . '/';
         $fileManager->mkdir($extractPath);
 
         try {
-            // Extract files
             (new \PharData($filePath))->extractTo($extractPath, null, true);
 
-            // Find version.xml
             foreach (new \DirectoryIterator($extractPath) as $current) {
                 if ($current->isDir() && $current->getBasename() !== '..' &&
                     is_file(($path = "{$current->getPathname()}/") . 'version.xml')) {
-
-                    $versionFile = $path . 'version.xml';
-                    $versionInfo = \PKP\site\VersionCheck::parseVersionXML($versionFile);
-
-                    // Cleanup
-                    $fileManager->rmtree($extractPath);
-
-                    return [
-                        'product' => $versionInfo['application'], // parseVersionXML returns 'application'
-                        'productType' => $versionInfo['type'],     // parseVersionXML returns 'type'
-                        'version' => $versionInfo['release']
-                    ];
+                    return $on_extracted($path);
                 }
             }
 
@@ -1680,6 +1704,43 @@ class Plugin_Command
                 $fileManager->rmtree($extractPath);
             }
         }
+    }
+
+    /**
+     * Replace an installed plugin's files with the archive's, same version
+     *
+     * Same file steps as PluginHelper::upgradePlugin(), minus upgrade.xml and
+     * the versions row: the version is unchanged, so there is nothing to
+     * migrate or record. The old directory is kept until the copy succeeds.
+     *
+     * @param string $file_path Path to plugin archive
+     * @param string $category Plugin category
+     * @param string $plugin_name Plugin directory name
+     * @throws \Exception on failure (the original files are restored)
+     */
+    private function reinstall_plugin_files($file_path, $category, $plugin_name)
+    {
+        $this->with_extracted_archive($file_path, basename($file_path), function ($plugin_dir) use ($category, $plugin_name) {
+            $fileManager = new \PKP\file\FileManager();
+            $destination = \PKP\core\Core::getBaseDir() . "/plugins/{$category}/{$plugin_name}";
+            $backup = "{$destination}.ojs-cli-backup";
+
+            if (is_dir($destination) && !rename($destination, $backup)) {
+                throw new \Exception("Could not move aside existing plugin files: {$destination}");
+            }
+
+            if (!$fileManager->copyDir($plugin_dir, $destination)) {
+                $fileManager->rmtree($destination);
+                if (is_dir($backup)) {
+                    rename($backup, $destination);
+                }
+                throw new \Exception("Could not copy plugin files to: {$destination}");
+            }
+
+            if (is_dir($backup)) {
+                $fileManager->rmtree($backup);
+            }
+        });
     }
 
     /**

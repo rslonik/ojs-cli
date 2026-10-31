@@ -92,7 +92,7 @@ ojs plugin upgrade customBlockManager
 # Upgrade from local file (✅ working)
 ojs plugin upgrade /path/to/plugin.tar.gz
 
-# Force upgrade even if version appears current (✅ working)
+# Reinstall the current version's files (✅ working)
 ojs plugin upgrade customBlockManager --force
 ```
 
