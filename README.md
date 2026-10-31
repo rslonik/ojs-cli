@@ -2,7 +2,7 @@
 
 A standalone CLI tool for OJS (Open Journal Systems) modeled after WordPress's WP-CLI. This tool provides command-line management capabilities for OJS installations.
 
-A few words from the human: this is a work in progress. It supports only OJS 3.5 for now. It was coded with Claude with some human bug hunting/fixing where the IA lost it's mojo. Obviously it's not recommended to use it in production if you do not know how to recover from problems.
+A few words from the human: this is a work in progress. It supports OJS 3.5 and OMP 3.5 for now. It was coded with Claude with some human bug hunting/fixing where the IA lost it's mojo. Obviously it's not recommended to use it in production if you do not know how to recover from problems.
 
 To use this just clone and set up an alias to bin/ojs. Run it inside the installation folder or use `--path` global option to specify the installation path.
 
@@ -30,11 +30,11 @@ To use this just clone and set up an alias to bin/ojs. Run it inside the install
 **Key Features**:
 - [not yet] Global Composer installation (`composer global require pkp/ojs-cli`)
 - Auto-discovery of OJS installations
-- Context-aware operations (site-wide or journal-specific)
+- Context-aware operations (site-wide, journal- or press-specific)
 - Multiple output formats (table, JSON, CSV, YAML)
 - No modifications to OJS core required
 
-**Target Version**: OJS 3.5
+**Target Versions**: OJS 3.5, OMP 3.5
 
 ## Available Commands
 
@@ -106,15 +106,15 @@ ojs plugin upgrade customBlockManager --force
 
 **Context Awareness**:
 - Auto-detects if plugin is site-wide (reads `<sitewide>` tag from version.xml)
-- Defaults to appropriate context for journal-specific plugins
-- Override with `--context=<journal-path>` or `--context=site-wide`
+- Defaults to appropriate context for journal- or press-specific plugins (the journal/press must be unambiguous)
+- Override with `--context=<journal-or-press-path>` or `--context=site-wide`
 
 **Plugin Name Matching**:
 - Fuzzy matching handles variations (e.g., "shariff" vs "shariffplugin")
 
 **Gallery Installation**:
 - Downloads from https://pkp.sfu.ca/ojs/xml/plugins.xml
-- Compatibility checking (only shows OJS version-compatible plugins)
+- Compatibility checking (only shows plugins compatible with the installed application and version)
 - MD5 checksum verification for download integrity
 - Streaming download in 80KB chunks for large plugins
 - Auto-cleanup of temporary files
@@ -188,7 +188,7 @@ php bin/ojs --version
 - PHP 8.2 or higher (8.3 recommended)
 - Composer
 - PHP extensions: phar, curl, zip
-- Access to an OJS 3.5 installation
+- Access to an OJS 3.5 or OMP 3.5 installation
 
 ## Development Setup
 

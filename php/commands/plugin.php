@@ -10,6 +10,6 @@ if (!class_exists('OJS_CLI')) {
 
 // Command will be loaded from src/ directory
 OJS_CLI::add_command('plugin', 'Plugin_Command', [
-    'shortdesc' => 'Manage OJS plugins',
+    'shortdesc' => 'Manage OJS and OMP plugins',
     'when' => 'after_ojs_load'
 ]);

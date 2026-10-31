@@ -3,7 +3,7 @@
 /**
  * Plugin Command
  *
- * Manages OJS plugins
+ * Manages OJS and OMP plugins
  */
 class Plugin_Command
 {
@@ -15,6 +15,33 @@ class Plugin_Command
     private const CONTEXT_AUTO = 'auto';
 
     /**
+     * Get the enabled contexts (journals in OJS, presses in OMP)
+     *
+     * @return array Map of context ID => path
+     */
+    private function get_contexts()
+    {
+        $contexts = \APP\core\Application::getContextDAO()->getAll(true);
+
+        $paths = [];
+        while ($context = $contexts->next()) {
+            $paths[$context->getId()] = $context->getPath();
+        }
+
+        return $paths;
+    }
+
+    /**
+     * Name of the application's context, for messages
+     *
+     * @return string "journal" (OJS) or "press" (OMP)
+     */
+    private function context_noun()
+    {
+        return \APP\core\Application::get()->getContextName();
+    }
+
+    /**
      * Lists all available plugins
      *
      * ## OPTIONS
@@ -23,7 +50,7 @@ class Plugin_Command
      * : Filter by plugin category (generic, blocks, themes, etc.)
      *
      * [--context=<path>]
-     * : Journal context path for context-specific plugins
+     * : Journal (OJS) or press (OMP) path for context-specific plugins
      *
      * [--format=<format>]
      * : Output format (table, json, csv, yaml)
@@ -91,16 +118,15 @@ class Plugin_Command
             return \PKP\core\PKPApplication::SITE_CONTEXT_ID; // null
         }
 
-        // Explicit journal path
+        // Explicit journal/press path
         if ($context_path !== null) {
-            $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
-            $journal = $journal_dao->getByPath($context_path);
+            $context = \APP\core\Application::getContextDAO()->getByPath($context_path);
 
-            if (!$journal) {
-                OJS_CLI::error("Journal not found: {$context_path}");
+            if (!$context) {
+                OJS_CLI::error(ucfirst($this->context_noun()) . " not found: {$context_path}");
             }
 
-            return $journal->getId();
+            return $context->getId();
         }
 
         // Auto-detect: resolved per-plugin later
@@ -125,33 +151,29 @@ class Plugin_Command
             return \PKP\core\PKPApplication::SITE_CONTEXT_ID;
         }
 
-        // Journal-specific plugin: only auto-select when the choice is
+        // Context-specific plugin: only auto-select when the choice is
         // unambiguous. Guessing writes the setting to a context the user did
         // not intend, and the command has no way to tell them which one.
-        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
-        $journals = $journal_dao->getAll(true);
+        $context_paths = $this->get_contexts();
+        $noun = $this->context_noun();
+        $nouns = \Illuminate\Support\Str::plural($noun);
 
-        $journal_paths = [];
-        while ($journal = $journals->next()) {
-            $journal_paths[$journal->getId()] = $journal->getPath();
-        }
-
-        if (empty($journal_paths)) {
+        if (empty($context_paths)) {
             OJS_CLI::error(
-                "This plugin is journal-specific and no journals exist.\n" .
-                "Create a journal first, or use --context=site-wide."
+                "This plugin is {$noun}-specific and no {$nouns} exist.\n" .
+                "Create a {$noun} first, or use --context=site-wide."
             );
         }
 
-        if (count($journal_paths) > 1) {
+        if (count($context_paths) > 1) {
             OJS_CLI::error(
-                "This plugin is journal-specific and this installation has several journals.\n" .
-                "Choose one with --context=<path>: " . implode(', ', $journal_paths) . "\n" .
+                "This plugin is {$noun}-specific and this installation has several {$nouns}.\n" .
+                "Choose one with --context=<path>: " . implode(', ', $context_paths) . "\n" .
                 "Or use --context=site-wide to write the setting at the site level."
             );
         }
 
-        return array_key_first($journal_paths);
+        return array_key_first($context_paths);
     }
 
     /**
@@ -166,10 +188,9 @@ class Plugin_Command
             return 'site-wide';
         }
 
-        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
-        $journal = $journal_dao->getById($context_id);
+        $context = \APP\core\Application::getContextDAO()->getById($context_id);
 
-        return $journal ? "journal: {$journal->getPath()}" : "context {$context_id}";
+        return $context ? "{$this->context_noun()}: {$context->getPath()}" : "context {$context_id}";
     }
 
     /**
@@ -229,13 +250,7 @@ class Plugin_Command
             $categories = \PKP\plugins\PluginRegistry::getCategories();
         }
 
-        // Get all journal contexts
-        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
-        $journals = $journal_dao->getAll(true);
-        $journal_contexts = [];
-        while ($journal = $journals->next()) {
-            $journal_contexts[$journal->getId()] = $journal->getPath();
-        }
+        $contexts = $this->get_contexts();
 
         $all_plugins = [];
 
@@ -249,7 +264,7 @@ class Plugin_Command
 
                 // Check where this plugin is enabled
                 // Note: get_plugin_enabled_contexts uses getName() internally for PluginSettingsDAO
-                $enabled_in = $this->get_plugin_enabled_contexts($plugin, $journal_contexts);
+                $enabled_in = $this->get_plugin_enabled_contexts($plugin, $contexts);
 
                 // Determine if plugin matches status filter
                 $is_enabled = !empty($enabled_in);
@@ -288,10 +303,10 @@ class Plugin_Command
      * Get contexts where a plugin is enabled
      *
      * @param object $plugin Plugin object
-     * @param array $journal_contexts Map of journal ID => path
-     * @return string "site-wide", comma-separated context IDs, or empty string
+     * @param array $contexts Map of context ID => path
+     * @return string "site-wide", comma-separated context paths, or empty string
      */
-    private function get_plugin_enabled_contexts($plugin, $journal_contexts)
+    private function get_plugin_enabled_contexts($plugin, $contexts)
     {
         $plugin_name = $plugin->getName();
         $pluginSettingsDao = \PKP\db\DAORegistry::getDAO('PluginSettingsDAO');
@@ -307,9 +322,8 @@ class Plugin_Command
             return 'site-wide';
         }
 
-        // Check each journal context
         $enabled_contexts = [];
-        foreach ($journal_contexts as $context_id => $path) {
+        foreach ($contexts as $context_id => $path) {
             $enabled = (bool)$pluginSettingsDao->getSetting($context_id, $plugin_name, 'enabled');
             if ($enabled) {
                 $enabled_contexts[] = $path;
@@ -334,7 +348,7 @@ class Plugin_Command
      * ---
      *
      * [--context=<path>]
-     * : Journal context path for context-specific information
+     * : Journal (OJS) or press (OMP) path for context-specific information
      *
      * ## EXAMPLES
      *
@@ -424,12 +438,12 @@ class Plugin_Command
      * : Plugin category (if known, for faster lookup)
      *
      * [--context=<path>]
-     * : Journal context path, or 'site-wide'. When omitted the context is
+     * : Journal (OJS) or press (OMP) path, or 'site-wide'. When omitted the context is
      * detected from the plugin: site-wide for plugins that declare themselves
-     * as such, otherwise the journal - which must be unambiguous.
+     * as such, otherwise the journal or press - which must be unambiguous.
      *
      * [--all-contexts]
-     * : Activate for all journals
+     * : Activate for all journals or presses
      *
      * ## EXAMPLES
      *
@@ -458,7 +472,7 @@ class Plugin_Command
 
         // Handle bulk activation for all contexts
         if ($all_contexts) {
-            $this->activate_for_all_contexts($plugin_name, $category);
+            $this->set_enabled_for_all_contexts($plugin_name, $category, true);
             return;
         }
 
@@ -492,12 +506,12 @@ class Plugin_Command
      * : Plugin category (if known, for faster lookup)
      *
      * [--context=<path>]
-     * : Journal context path, or 'site-wide'. When omitted the context is
+     * : Journal (OJS) or press (OMP) path, or 'site-wide'. When omitted the context is
      * detected from the plugin: site-wide for plugins that declare themselves
-     * as such, otherwise the journal - which must be unambiguous.
+     * as such, otherwise the journal or press - which must be unambiguous.
      *
      * [--all-contexts]
-     * : Deactivate for all journals
+     * : Deactivate for all journals or presses
      *
      * ## EXAMPLES
      *
@@ -523,7 +537,7 @@ class Plugin_Command
 
         // Handle bulk deactivation for all contexts
         if ($all_contexts) {
-            $this->deactivate_for_all_contexts($plugin_name, $category);
+            $this->set_enabled_for_all_contexts($plugin_name, $category, false);
             return;
         }
 
@@ -613,7 +627,7 @@ class Plugin_Command
 
         $context->setData($agency, \PKP\context\Context::SETTING_NO_REGISTRATION_AGENCY);
         $contextDao->updateObject($context);
-        OJS_CLI::log('Cleared the journal\'s configured DOI registration agency');
+        OJS_CLI::log("Cleared the {$this->context_noun()}'s configured DOI registration agency");
     }
 
     /**
@@ -786,105 +800,44 @@ class Plugin_Command
     }
 
     /**
-     * Activates plugin for all journals
+     * Activate or deactivate a plugin in every enabled journal/press
      *
      * @param string $plugin_name Plugin name
      * @param string|null $category Plugin category
+     * @param bool $enabled New enabled state
      */
-    private function activate_for_all_contexts($plugin_name, $category)
+    private function set_enabled_for_all_contexts($plugin_name, $category, $enabled)
     {
-        // Find the plugin to get category
         $plugin_info = $this->find_plugin($plugin_name, $category);
         if (!$plugin_info) {
             OJS_CLI::error("Plugin not found: {$plugin_name}");
         }
         $plugin = $plugin_info['plugin'];
 
-        $this->reject_all_contexts_for_sitewide($plugin, $plugin_name);
-
-        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
-        $journals = $journal_dao->getAll(true); // enabled journals only
-
-        $results = [];
-        while ($journal = $journals->next()) {
-            $context_id = $journal->getId();
-
-            try {
-                $this->set_plugin_enabled($plugin, true, $context_id);
-                $results[] = [
-                    'journal' => $journal->getPath(),
-                    'status' => 'success'
-                ];
-            } catch (\Exception $e) {
-                $results[] = [
-                    'journal' => $journal->getPath(),
-                    'status' => 'error',
-                    'message' => $e->getMessage()
-                ];
-            }
-        }
-
-        // Display summary
-        OJS_CLI::line('');
-        OJS_CLI::line("Activated '{$plugin_name}' for journals:");
-        foreach ($results as $result) {
-            $status_icon = $result['status'] === 'success' ? OJS_CLI::colorize('✓', 'green') : OJS_CLI::colorize('✗', 'red');
-            $message = $result['status'] === 'success' ? '' : ' - ' . $result['message'];
-            OJS_CLI::line("  {$status_icon} {$result['journal']}{$message}");
-        }
-        OJS_CLI::line('');
-    }
-
-    /**
-     * Deactivates plugin for all journals
-     *
-     * @param string $plugin_name Plugin name
-     * @param string|null $category Plugin category
-     */
-    private function deactivate_for_all_contexts($plugin_name, $category)
-    {
-        // Find the plugin to get category
-        $plugin_info = $this->find_plugin($plugin_name, $category);
-        if (!$plugin_info) {
-            OJS_CLI::error("Plugin not found: {$plugin_name}");
-        }
-        $plugin = $plugin_info['plugin'];
-
-        if (!$plugin->getCanDisable()) {
+        if (!$enabled && !$plugin->getCanDisable()) {
             OJS_CLI::error("Plugin '{$plugin_name}' is mandatory and cannot be deactivated.");
         }
 
         $this->reject_all_contexts_for_sitewide($plugin, $plugin_name);
 
-        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
-        $journals = $journal_dao->getAll(true); // enabled journals only
-
         $results = [];
-        while ($journal = $journals->next()) {
-            $context_id = $journal->getId();
-
+        foreach ($this->get_contexts() as $context_id => $path) {
             try {
-                $this->set_plugin_enabled($plugin, false, $context_id);
-                $results[] = [
-                    'journal' => $journal->getPath(),
-                    'status' => 'success'
-                ];
+                $this->set_plugin_enabled($plugin, $enabled, $context_id);
+                $results[] = ['context' => $path, 'status' => 'success'];
             } catch (\Exception $e) {
-                $results[] = [
-                    'journal' => $journal->getPath(),
-                    'status' => 'error',
-                    'message' => $e->getMessage()
-                ];
+                $results[] = ['context' => $path, 'status' => 'error', 'message' => $e->getMessage()];
             }
         }
 
         // Display summary
+        $action = $enabled ? 'Activated' : 'Deactivated';
         OJS_CLI::line('');
-        OJS_CLI::line("Deactivated '{$plugin_name}' for journals:");
+        OJS_CLI::line("{$action} '{$plugin_name}' for " . \Illuminate\Support\Str::plural($this->context_noun()) . ":");
         foreach ($results as $result) {
             $status_icon = $result['status'] === 'success' ? OJS_CLI::colorize('✓', 'green') : OJS_CLI::colorize('✗', 'red');
             $message = $result['status'] === 'success' ? '' : ' - ' . $result['message'];
-            OJS_CLI::line("  {$status_icon} {$result['journal']}{$message}");
+            OJS_CLI::line("  {$status_icon} {$result['context']}{$message}");
         }
         OJS_CLI::line('');
     }
@@ -901,7 +854,7 @@ class Plugin_Command
      * : Activate plugin after installation
      *
      * [--context=<path>]
-     * : Journal context for activation
+     * : Journal (OJS) or press (OMP) path for activation
      *
      * ## EXAMPLES
      *
@@ -1035,7 +988,7 @@ class Plugin_Command
 
         if (!$galleryPlugin) {
             OJS_CLI::error(
-                "Plugin '{$plugin_name}' not found in gallery or not compatible with this OJS version.\n" .
+                "Plugin '{$plugin_name}' not found in gallery or not compatible with this application version.\n" .
                 "Try 'ojs plugin list' to see installed plugins or check https://pkp.github.io/plugin-compatibility/index.html"
             );
         }
@@ -1094,7 +1047,7 @@ class Plugin_Command
      * ## NOTES
      *
      * Plugins must be deactivated before deletion. If the plugin is enabled
-     * in any context (site-wide or journal-specific), deletion will be blocked
+     * in any context (site-wide, journal- or press-specific), deletion will be blocked
      * unless --force is used. It's recommended to deactivate first:
      *
      *   $ ojs plugin deactivate customBlockManager
@@ -1120,14 +1073,7 @@ class Plugin_Command
         $plugin_obj = $plugin['plugin'];
 
         // Check if plugin is enabled anywhere
-        $journal_dao = \PKP\db\DAORegistry::getDAO('JournalDAO');
-        $journals = $journal_dao->getAll(true);
-        $journal_contexts = [];
-        while ($journal = $journals->next()) {
-            $journal_contexts[$journal->getId()] = $journal->getPath();
-        }
-
-        $enabled_in = $this->get_plugin_enabled_contexts($plugin_obj, $journal_contexts);
+        $enabled_in = $this->get_plugin_enabled_contexts($plugin_obj, $this->get_contexts());
 
         if (!empty($enabled_in) && !$force) {
             OJS_CLI::error(
@@ -1455,7 +1401,7 @@ class Plugin_Command
         if ($comparison < 0) {
             throw new \Exception(
                 "Downgrade not supported: archive version ({$new_version}) is older than installed version ({$current_version_string}).\n" .
-                "OJS cannot roll back plugin database migrations."
+                "PKP applications cannot roll back plugin database migrations."
             );
         }
 
@@ -1529,7 +1475,7 @@ class Plugin_Command
         }
 
         if (!$galleryPlugin) {
-            throw new \Exception("Plugin not found in gallery or not compatible with your OJS version.");
+            throw new \Exception("Plugin not found in gallery or not compatible with your application version.");
         }
 
         $available_version = $galleryPlugin->getVersion();
